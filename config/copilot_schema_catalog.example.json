@@ -1,0 +1,61 @@
+{
+  "business_rules": [
+    "Use invoice_date for sales questions involving today, yesterday, month, or year.",
+    "Revenue means SUM(net_amount) unless the final schema says otherwise."
+  ],
+  "tables": [
+    {
+      "name": "sales_invoice",
+      "description": "One row per sales invoice or bill.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "description": "Invoice identifier."
+        },
+        {
+          "name": "invoice_date",
+          "type": "date",
+          "description": "Business date of the sale."
+        },
+        {
+          "name": "party_id",
+          "type": "uuid",
+          "description": "Customer or party identifier."
+        },
+        {
+          "name": "net_amount",
+          "type": "numeric",
+          "description": "Revenue amount after discounts and before final schema-specific adjustments."
+        }
+      ],
+      "joins": [
+        "sales_invoice.party_id = party.id"
+      ],
+      "examples": [
+        "What was total sales today?",
+        "Which party generated the most revenue this month?"
+      ]
+    },
+    {
+      "name": "party",
+      "description": "Customer or party master data.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "description": "Party identifier."
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "description": "Party display name."
+        }
+      ],
+      "joins": [],
+      "examples": [
+        "Which party did most revenue?"
+      ]
+    }
+  ]
+}

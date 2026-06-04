@@ -1,0 +1,2188 @@
+{
+  "business_rules": [
+    "Use invoice_date for invoice sales questions when available.",
+    "Use so_date for sales order questions when available.",
+    "Revenue or sales amount usually means SUM(total_grand_amount), SUM(total_amount), or SUM(net_amount); choose the column that best matches the table and question.",
+    "For item-level revenue questions, prefer item/detail tables and group by product_name or item name when available.",
+    "For party/customer revenue questions, group by customer, party name, or party_id depending on available columns."
+  ],
+  "tables": [
+    {
+      "name": "sales_order",
+      "description": "Sales Order table from schema public.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "description": "Id column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "average_liter_rate",
+          "type": "double precision",
+          "description": "Average Liter Rate column; required.",
+          "synonyms": [
+            "average liter rate"
+          ]
+        },
+        {
+          "name": "customer",
+          "type": "character varying",
+          "description": "Customer column; max length 255.",
+          "synonyms": []
+        },
+        {
+          "name": "customer_by",
+          "type": "integer",
+          "description": "Customer By column; required.",
+          "synonyms": [
+            "customer by"
+          ]
+        },
+        {
+          "name": "gst_amount",
+          "type": "double precision",
+          "description": "Gst Amount column; required.",
+          "synonyms": [
+            "gst amount",
+            "tax amount"
+          ]
+        },
+        {
+          "name": "is_closed",
+          "type": "boolean",
+          "description": "Is Closed column.",
+          "synonyms": [
+            "is closed"
+          ]
+        },
+        {
+          "name": "raised_by",
+          "type": "integer",
+          "description": "Raised By column; required.",
+          "synonyms": [
+            "raised by"
+          ]
+        },
+        {
+          "name": "salesexecutive",
+          "type": "character varying",
+          "description": "Salesexecutive column; max length 255.",
+          "synonyms": []
+        },
+        {
+          "name": "scheme_id",
+          "type": "bigint",
+          "description": "Scheme Id column.",
+          "synonyms": [
+            "scheme id"
+          ]
+        },
+        {
+          "name": "so_date",
+          "type": "date",
+          "description": "So Date column.",
+          "synonyms": [
+            "sales order date",
+            "so date"
+          ]
+        },
+        {
+          "name": "so_number",
+          "type": "character varying",
+          "description": "So Number column; max length 255.",
+          "synonyms": [
+            "sales order number",
+            "so number"
+          ]
+        },
+        {
+          "name": "status",
+          "type": "character varying",
+          "description": "Status column; max length 255.",
+          "synonyms": []
+        },
+        {
+          "name": "total_amount",
+          "type": "double precision",
+          "description": "Total Amount column; required.",
+          "synonyms": [
+            "total amount"
+          ]
+        },
+        {
+          "name": "total_box_quantity",
+          "type": "integer",
+          "description": "Total Box Quantity column.",
+          "synonyms": [
+            "total box quantity"
+          ]
+        },
+        {
+          "name": "total_grand_amount",
+          "type": "double precision",
+          "description": "Total Grand Amount column; required.",
+          "synonyms": [
+            "total grand amount"
+          ]
+        },
+        {
+          "name": "total_liters",
+          "type": "double precision",
+          "description": "Total Liters column; required.",
+          "synonyms": [
+            "total liters"
+          ]
+        },
+        {
+          "name": "assign_psr_id",
+          "type": "integer",
+          "description": "Assign Psr Id column; required.",
+          "synonyms": [
+            "assign psr id"
+          ]
+        }
+      ],
+      "joins": [],
+      "examples": []
+    },
+    {
+      "name": "sales_order_item",
+      "description": "Sales Order Item table from schema public.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "description": "Id column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "price",
+          "type": "double precision",
+          "description": "Price column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "code",
+          "type": "character varying",
+          "description": "Code column; max length 255.",
+          "synonyms": []
+        },
+        {
+          "name": "free_qty",
+          "type": "integer",
+          "description": "Free Qty column; required.",
+          "synonyms": [
+            "free qty",
+            "free quantity"
+          ]
+        },
+        {
+          "name": "gst",
+          "type": "integer",
+          "description": "Gst column; required.",
+          "synonyms": [
+            "tax"
+          ]
+        },
+        {
+          "name": "gst_amount",
+          "type": "double precision",
+          "description": "Gst Amount column; required.",
+          "synonyms": [
+            "gst amount",
+            "tax amount"
+          ]
+        },
+        {
+          "name": "is_closed",
+          "type": "boolean",
+          "description": "Is Closed column.",
+          "synonyms": [
+            "is closed"
+          ]
+        },
+        {
+          "name": "mrp",
+          "type": "double precision",
+          "description": "Mrp column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "net_amount",
+          "type": "double precision",
+          "description": "Net Amount column; required.",
+          "synonyms": [
+            "net amount"
+          ]
+        },
+        {
+          "name": "product_id",
+          "type": "bigint",
+          "description": "Product Id column.",
+          "synonyms": [
+            "product id"
+          ]
+        },
+        {
+          "name": "product_name",
+          "type": "character varying",
+          "description": "Product Name column; max length 255.",
+          "synonyms": [
+            "product name"
+          ]
+        },
+        {
+          "name": "qty",
+          "type": "integer",
+          "description": "Qty column; required.",
+          "synonyms": [
+            "quantity"
+          ]
+        },
+        {
+          "name": "received_quantity",
+          "type": "integer",
+          "description": "Received Quantity column.",
+          "synonyms": [
+            "received quantity"
+          ]
+        },
+        {
+          "name": "remaining_quantity",
+          "type": "integer",
+          "description": "Remaining Quantity column.",
+          "synonyms": [
+            "remaining quantity"
+          ]
+        },
+        {
+          "name": "total_volume",
+          "type": "double precision",
+          "description": "Total Volume column; required.",
+          "synonyms": [
+            "total volume"
+          ]
+        },
+        {
+          "name": "sales_order_id",
+          "type": "bigint",
+          "description": "Sales Order Id column.",
+          "synonyms": [
+            "sales order id"
+          ]
+        }
+      ],
+      "joins": [
+        "sales_order_item.sales_order_id = sales_order.id"
+      ],
+      "examples": []
+    },
+    {
+      "name": "sales_invoice",
+      "description": "Sales Invoice table from schema public.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "description": "Id column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "average_liter_rate",
+          "type": "double precision",
+          "description": "Average Liter Rate column.",
+          "synonyms": [
+            "average liter rate"
+          ]
+        },
+        {
+          "name": "batch_no",
+          "type": "character varying",
+          "description": "Batch No column; max length 255.",
+          "synonyms": [
+            "batch no"
+          ]
+        },
+        {
+          "name": "customer",
+          "type": "character varying",
+          "description": "Customer column; max length 255.",
+          "synonyms": []
+        },
+        {
+          "name": "customer_by",
+          "type": "integer",
+          "description": "Customer By column; required.",
+          "synonyms": [
+            "customer by"
+          ]
+        },
+        {
+          "name": "disflag",
+          "type": "integer",
+          "description": "Disflag column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "id_req_by",
+          "type": "integer",
+          "description": "Id Req By column; required.",
+          "synonyms": [
+            "id req by"
+          ]
+        },
+        {
+          "name": "invoice_date",
+          "type": "date",
+          "description": "Invoice Date column.",
+          "synonyms": [
+            "invoice date"
+          ]
+        },
+        {
+          "name": "invoice_number",
+          "type": "character varying",
+          "description": "Invoice Number column; max length 255.",
+          "synonyms": [
+            "invoice number"
+          ]
+        },
+        {
+          "name": "invoicer",
+          "type": "character varying",
+          "description": "Invoicer column; max length 255.",
+          "synonyms": []
+        },
+        {
+          "name": "payment_by",
+          "type": "character varying",
+          "description": "Payment By column; max length 255.",
+          "synonyms": [
+            "payment by"
+          ]
+        },
+        {
+          "name": "payment_date",
+          "type": "date",
+          "description": "Payment Date column.",
+          "synonyms": [
+            "payment date"
+          ]
+        },
+        {
+          "name": "payment_flag",
+          "type": "integer",
+          "description": "Payment Flag column; required.",
+          "synonyms": [
+            "payment flag"
+          ]
+        },
+        {
+          "name": "raised_by",
+          "type": "integer",
+          "description": "Raised By column; required.",
+          "synonyms": [
+            "raised by"
+          ]
+        },
+        {
+          "name": "received_amount",
+          "type": "double precision",
+          "description": "Received Amount column.",
+          "synonyms": [
+            "received amount"
+          ]
+        },
+        {
+          "name": "remaining_amount",
+          "type": "double precision",
+          "description": "Remaining Amount column.",
+          "synonyms": [
+            "remaining amount"
+          ]
+        },
+        {
+          "name": "sales_return",
+          "type": "integer",
+          "description": "Sales Return column; required.",
+          "synonyms": [
+            "sales return"
+          ]
+        },
+        {
+          "name": "scheme_based_on",
+          "type": "character varying",
+          "description": "Scheme Based On column; max length 255.",
+          "synonyms": [
+            "scheme based on"
+          ]
+        },
+        {
+          "name": "scheme_discounted_amount",
+          "type": "double precision",
+          "description": "Scheme Discounted Amount column; required.",
+          "synonyms": [
+            "scheme discounted amount"
+          ]
+        },
+        {
+          "name": "scheme_disper_amt",
+          "type": "double precision",
+          "description": "Scheme Disper Amt column; required.",
+          "synonyms": [
+            "scheme disper amount",
+            "scheme disper amt"
+          ]
+        },
+        {
+          "name": "scheme_id",
+          "type": "bigint",
+          "description": "Scheme Id column.",
+          "synonyms": [
+            "scheme id"
+          ]
+        },
+        {
+          "name": "scheme_name",
+          "type": "character varying",
+          "description": "Scheme Name column; max length 255.",
+          "synonyms": [
+            "scheme name"
+          ]
+        },
+        {
+          "name": "so_date",
+          "type": "date",
+          "description": "So Date column.",
+          "synonyms": [
+            "sales order date",
+            "so date"
+          ]
+        },
+        {
+          "name": "so_number",
+          "type": "character varying",
+          "description": "So Number column; max length 255.",
+          "synonyms": [
+            "sales order number",
+            "so number"
+          ]
+        },
+        {
+          "name": "supplier",
+          "type": "character varying",
+          "description": "Supplier column; max length 255.",
+          "synonyms": []
+        },
+        {
+          "name": "total_amount",
+          "type": "double precision",
+          "description": "Total Amount column.",
+          "synonyms": [
+            "total amount"
+          ]
+        },
+        {
+          "name": "total_box_quantity",
+          "type": "integer",
+          "description": "Total Box Quantity column.",
+          "synonyms": [
+            "total box quantity"
+          ]
+        },
+        {
+          "name": "total_grand_amount",
+          "type": "double precision",
+          "description": "Total Grand Amount column; required.",
+          "synonyms": [
+            "total grand amount"
+          ]
+        },
+        {
+          "name": "total_liters",
+          "type": "double precision",
+          "description": "Total Liters column.",
+          "synonyms": [
+            "total liters"
+          ]
+        },
+        {
+          "name": "sales_order_id",
+          "type": "bigint",
+          "description": "Sales Order Id column.",
+          "synonyms": [
+            "sales order id"
+          ]
+        },
+        {
+          "name": "payment_status",
+          "type": "character varying",
+          "description": "Payment Status column; max length 255.",
+          "synonyms": [
+            "payment status"
+          ]
+        },
+        {
+          "name": "spl_discount_based_on",
+          "type": "character varying",
+          "description": "Spl Discount Based On column; max length 255.",
+          "synonyms": [
+            "spl discount based on"
+          ]
+        },
+        {
+          "name": "total_gst_amount",
+          "type": "double precision",
+          "description": "Total Gst Amount column.",
+          "synonyms": [
+            "total gst amount",
+            "total tax amount"
+          ]
+        },
+        {
+          "name": "grand_total_wo_spl_disc",
+          "type": "double precision",
+          "description": "Grand Total Wo Spl Disc column; required.",
+          "synonyms": [
+            "grand total wo spl disc"
+          ]
+        },
+        {
+          "name": "spl_discount",
+          "type": "double precision",
+          "description": "Spl Discount column.",
+          "synonyms": [
+            "spl discount"
+          ]
+        },
+        {
+          "name": "discount_per",
+          "type": "integer",
+          "description": "Discount Per column; required.",
+          "synonyms": [
+            "discount per"
+          ]
+        },
+        {
+          "name": "grn_accepted_by",
+          "type": "integer",
+          "description": "Grn Accepted By column; required.",
+          "synonyms": [
+            "grn accepted by"
+          ]
+        },
+        {
+          "name": "grn_flag",
+          "type": "integer",
+          "description": "Grn Flag column; required.",
+          "synonyms": [
+            "grn flag"
+          ]
+        },
+        {
+          "name": "seller_party_id",
+          "type": "integer",
+          "description": "Seller Party Id column; required.",
+          "synonyms": [
+            "seller party id"
+          ]
+        },
+        {
+          "name": "opt_cash_discount",
+          "type": "character varying",
+          "description": "Opt Cash Discount column; max length 255.",
+          "synonyms": [
+            "opt cash discount"
+          ]
+        },
+        {
+          "name": "assign_psr_id",
+          "type": "integer",
+          "description": "Assign Psr Id column; required.",
+          "synonyms": [
+            "assign psr id"
+          ]
+        },
+        {
+          "name": "tcs_tax_amount",
+          "type": "double precision",
+          "description": "Tcs Tax Amount column; required.",
+          "synonyms": [
+            "tcs tax amount"
+          ]
+        },
+        {
+          "name": "ack_date",
+          "type": "timestamp without time zone",
+          "description": "Ack Date column.",
+          "synonyms": [
+            "ack date"
+          ]
+        },
+        {
+          "name": "ack_no",
+          "type": "character varying",
+          "description": "Ack No column; max length 255.",
+          "synonyms": [
+            "ack no"
+          ]
+        },
+        {
+          "name": "eway_bill_date",
+          "type": "timestamp without time zone",
+          "description": "Eway Bill Date column.",
+          "synonyms": [
+            "eway bill date"
+          ]
+        },
+        {
+          "name": "eway_bill_no",
+          "type": "character varying",
+          "description": "Eway Bill No column; max length 255.",
+          "synonyms": [
+            "eway bill no"
+          ]
+        },
+        {
+          "name": "eway_bill_till_date",
+          "type": "timestamp without time zone",
+          "description": "Eway Bill Till Date column.",
+          "synonyms": [
+            "eway bill till date"
+          ]
+        },
+        {
+          "name": "irn_number",
+          "type": "character varying",
+          "description": "Irn Number column; max length 255.",
+          "synonyms": [
+            "irn number"
+          ]
+        },
+        {
+          "name": "sales_edate",
+          "type": "timestamp without time zone",
+          "description": "Sales Edate column.",
+          "synonyms": [
+            "sales edate"
+          ]
+        },
+        {
+          "name": "signed_qr_code",
+          "type": "text",
+          "description": "Signed Qr Code column.",
+          "synonyms": [
+            "signed qr code"
+          ]
+        },
+        {
+          "name": "round_off",
+          "type": "double precision",
+          "description": "Round Off column; required.",
+          "synonyms": [
+            "round off"
+          ]
+        },
+        {
+          "name": "e_way_bill_flag",
+          "type": "integer",
+          "description": "E Way Bill Flag column; required.",
+          "synonyms": [
+            "e way bill flag"
+          ]
+        },
+        {
+          "name": "dis_id",
+          "type": "bigint",
+          "description": "Dis Id column.",
+          "synonyms": [
+            "dis id"
+          ]
+        },
+        {
+          "name": "cheque_bounce",
+          "type": "character varying",
+          "description": "Cheque Bounce column; max length 255.",
+          "synonyms": [
+            "cheque bounce"
+          ]
+        },
+        {
+          "name": "bounce_remark",
+          "type": "character varying",
+          "description": "Bounce Remark column; max length 255.",
+          "synonyms": [
+            "bounce remark"
+          ]
+        },
+        {
+          "name": "item_discount",
+          "type": "character varying",
+          "description": "Item Discount column; max length 255.",
+          "synonyms": [
+            "item discount"
+          ]
+        },
+        {
+          "name": "assign_psr_name",
+          "type": "character varying",
+          "description": "Assign Psr Name column; max length 255.",
+          "synonyms": [
+            "assign psr name"
+          ]
+        },
+        {
+          "name": "total_amt_with_disc",
+          "type": "double precision",
+          "description": "Total Amt With Disc column.",
+          "synonyms": [
+            "total amount with disc",
+            "total amt with disc"
+          ]
+        },
+        {
+          "name": "common_discount",
+          "type": "integer",
+          "description": "Common Discount column.",
+          "synonyms": [
+            "common discount"
+          ]
+        },
+        {
+          "name": "common_discount_flag",
+          "type": "character varying",
+          "description": "Common Discount Flag column; max length 255.",
+          "synonyms": [
+            "common discount flag"
+          ]
+        },
+        {
+          "name": "total_free_qty",
+          "type": "integer",
+          "description": "Total Free Qty column; required.",
+          "synonyms": [
+            "total free qty",
+            "total free quantity"
+          ]
+        },
+        {
+          "name": "total_free_qty_amount",
+          "type": "double precision",
+          "description": "Total Free Qty Amount column; required.",
+          "synonyms": [
+            "total free qty amount",
+            "total free quantity amount"
+          ]
+        },
+        {
+          "name": "crate_qty",
+          "type": "integer",
+          "description": "Crate Qty column; required.",
+          "synonyms": [
+            "crate qty",
+            "crate quantity"
+          ]
+        },
+        {
+          "name": "sales_executive_id",
+          "type": "integer",
+          "description": "Sales Executive Id column; required.",
+          "synonyms": [
+            "sales executive id"
+          ]
+        },
+        {
+          "name": "sales_head_id",
+          "type": "integer",
+          "description": "Sales Head Id column; required.",
+          "synonyms": [
+            "sales head id"
+          ]
+        },
+        {
+          "name": "zonal_head_id",
+          "type": "integer",
+          "description": "Zonal Head Id column; required.",
+          "synonyms": [
+            "zonal head id"
+          ]
+        },
+        {
+          "name": "total_free_qty_basic_amount",
+          "type": "double precision",
+          "description": "Total Free Qty Basic Amount column; required.",
+          "synonyms": [
+            "total free qty basic amount",
+            "total free quantity basic amount"
+          ]
+        },
+        {
+          "name": "percentage_rate",
+          "type": "character varying",
+          "description": "Percentage Rate column; max length 255.",
+          "synonyms": [
+            "percentage rate"
+          ]
+        },
+        {
+          "name": "seller_representative_id",
+          "type": "integer",
+          "description": "Seller Representative Id column; required.",
+          "synonyms": [
+            "seller representative id"
+          ]
+        },
+        {
+          "name": "seller_representative_name",
+          "type": "character varying",
+          "description": "Seller Representative Name column; max length 255.",
+          "synonyms": [
+            "seller representative name"
+          ]
+        }
+      ],
+      "joins": [
+        "sales_invoice.sales_order_id = sales_order.id"
+      ],
+      "examples": []
+    },
+    {
+      "name": "sales_invoice_item",
+      "description": "Sales Invoice Item table from schema public.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "description": "Id column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "price",
+          "type": "double precision",
+          "description": "Price column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "code",
+          "type": "character varying",
+          "description": "Code column; max length 255.",
+          "synonyms": []
+        },
+        {
+          "name": "free_qty",
+          "type": "integer",
+          "description": "Free Qty column; required.",
+          "synonyms": [
+            "free qty",
+            "free quantity"
+          ]
+        },
+        {
+          "name": "gst",
+          "type": "double precision",
+          "description": "Gst column; required.",
+          "synonyms": [
+            "tax"
+          ]
+        },
+        {
+          "name": "gst_amount",
+          "type": "double precision",
+          "description": "Gst Amount column; required.",
+          "synonyms": [
+            "gst amount",
+            "tax amount"
+          ]
+        },
+        {
+          "name": "mrp",
+          "type": "double precision",
+          "description": "Mrp column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "net_amount",
+          "type": "double precision",
+          "description": "Net Amount column; required.",
+          "synonyms": [
+            "net amount"
+          ]
+        },
+        {
+          "name": "product_id",
+          "type": "bigint",
+          "description": "Product Id column.",
+          "synonyms": [
+            "product id"
+          ]
+        },
+        {
+          "name": "product_name",
+          "type": "character varying",
+          "description": "Product Name column; max length 255.",
+          "synonyms": [
+            "product name"
+          ]
+        },
+        {
+          "name": "qty",
+          "type": "integer",
+          "description": "Qty column; required.",
+          "synonyms": [
+            "quantity"
+          ]
+        },
+        {
+          "name": "so_line_item_id",
+          "type": "bigint",
+          "description": "So Line Item Id column.",
+          "synonyms": [
+            "sales order line item id",
+            "so line item id"
+          ]
+        },
+        {
+          "name": "total_volume",
+          "type": "double precision",
+          "description": "Total Volume column; required.",
+          "synonyms": [
+            "total volume"
+          ]
+        },
+        {
+          "name": "sales_invoice_id",
+          "type": "bigint",
+          "description": "Sales Invoice Id column.",
+          "synonyms": [
+            "sales invoice id"
+          ]
+        },
+        {
+          "name": "batch_no",
+          "type": "character varying",
+          "description": "Batch No column; max length 255.",
+          "synonyms": [
+            "batch no"
+          ]
+        },
+        {
+          "name": "hsn_sac",
+          "type": "character varying",
+          "description": "Hsn Sac column; max length 255.",
+          "synonyms": [
+            "hsn sac"
+          ]
+        },
+        {
+          "name": "price_level_date",
+          "type": "character varying",
+          "description": "Price Level Date column; max length 255.",
+          "synonyms": [
+            "price level date"
+          ]
+        },
+        {
+          "name": "item_discount",
+          "type": "double precision",
+          "description": "Item Discount column; required.",
+          "synonyms": [
+            "item discount"
+          ]
+        },
+        {
+          "name": "net_amount_with_disc",
+          "type": "double precision",
+          "description": "Net Amount With Disc column; required.",
+          "synonyms": [
+            "net amount with disc"
+          ]
+        },
+        {
+          "name": "basic_rate",
+          "type": "double precision",
+          "description": "Basic Rate column; required.",
+          "synonyms": [
+            "basic rate"
+          ]
+        },
+        {
+          "name": "basic_rate_amount",
+          "type": "double precision",
+          "description": "Basic Rate Amount column; required.",
+          "synonyms": [
+            "basic rate amount"
+          ]
+        },
+        {
+          "name": "percentage_rate",
+          "type": "character varying",
+          "description": "Percentage Rate column; max length 255.",
+          "synonyms": [
+            "percentage rate"
+          ]
+        },
+        {
+          "name": "tax_group",
+          "type": "integer",
+          "description": "Tax Group column.",
+          "synonyms": [
+            "tax group"
+          ]
+        }
+      ],
+      "joins": [
+        "sales_invoice_item.sales_invoice_id = sales_invoice.id"
+      ],
+      "examples": []
+    },
+    {
+      "name": "sales_return_item",
+      "description": "Sales Return Item table from schema public.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "description": "Id column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "code",
+          "type": "character varying",
+          "description": "Code column; max length 255.",
+          "synonyms": []
+        },
+        {
+          "name": "cost_price",
+          "type": "double precision",
+          "description": "Cost Price column; required.",
+          "synonyms": [
+            "cost price"
+          ]
+        },
+        {
+          "name": "disc",
+          "type": "double precision",
+          "description": "Disc column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "disc_amt",
+          "type": "double precision",
+          "description": "Disc Amt column; required.",
+          "synonyms": [
+            "disc amount",
+            "disc amt"
+          ]
+        },
+        {
+          "name": "free_qty",
+          "type": "integer",
+          "description": "Free Qty column; required.",
+          "synonyms": [
+            "free qty",
+            "free quantity"
+          ]
+        },
+        {
+          "name": "gst",
+          "type": "double precision",
+          "description": "Gst column; required.",
+          "synonyms": [
+            "tax"
+          ]
+        },
+        {
+          "name": "gst_amount",
+          "type": "double precision",
+          "description": "Gst Amount column; required.",
+          "synonyms": [
+            "gst amount",
+            "tax amount"
+          ]
+        },
+        {
+          "name": "inv_line_item_id",
+          "type": "bigint",
+          "description": "Inv Line Item Id column.",
+          "synonyms": [
+            "inv line item id"
+          ]
+        },
+        {
+          "name": "inv_qty",
+          "type": "integer",
+          "description": "Inv Qty column; required.",
+          "synonyms": [
+            "inv qty",
+            "inv quantity"
+          ]
+        },
+        {
+          "name": "mrp",
+          "type": "double precision",
+          "description": "Mrp column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "net_amount",
+          "type": "double precision",
+          "description": "Net Amount column; required.",
+          "synonyms": [
+            "net amount"
+          ]
+        },
+        {
+          "name": "product_id",
+          "type": "bigint",
+          "description": "Product Id column.",
+          "synonyms": [
+            "product id"
+          ]
+        },
+        {
+          "name": "product_name",
+          "type": "character varying",
+          "description": "Product Name column; max length 255.",
+          "synonyms": [
+            "product name"
+          ]
+        },
+        {
+          "name": "qty",
+          "type": "integer",
+          "description": "Qty column; required.",
+          "synonyms": [
+            "quantity"
+          ]
+        },
+        {
+          "name": "sell_price",
+          "type": "double precision",
+          "description": "Sell Price column; required.",
+          "synonyms": [
+            "sell price"
+          ]
+        },
+        {
+          "name": "sales_return_id",
+          "type": "bigint",
+          "description": "Sales Return Id column.",
+          "synonyms": [
+            "sales return id"
+          ]
+        },
+        {
+          "name": "batch_no",
+          "type": "character varying",
+          "description": "Batch No column; max length 255.",
+          "synonyms": [
+            "batch no"
+          ]
+        },
+        {
+          "name": "total_grand_amount",
+          "type": "double precision",
+          "description": "Total Grand Amount column; required.",
+          "synonyms": [
+            "total grand amount"
+          ]
+        },
+        {
+          "name": "total_gst_amount",
+          "type": "double precision",
+          "description": "Total Gst Amount column; required.",
+          "synonyms": [
+            "total gst amount",
+            "total tax amount"
+          ]
+        },
+        {
+          "name": "hsn_sac",
+          "type": "character varying",
+          "description": "Hsn Sac column; max length 255.",
+          "synonyms": [
+            "hsn sac"
+          ]
+        },
+        {
+          "name": "item_discount",
+          "type": "double precision",
+          "description": "Item Discount column; required.",
+          "synonyms": [
+            "item discount"
+          ]
+        },
+        {
+          "name": "net_amount_with_disc",
+          "type": "double precision",
+          "description": "Net Amount With Disc column; required.",
+          "synonyms": [
+            "net amount with disc"
+          ]
+        },
+        {
+          "name": "total_volume",
+          "type": "double precision",
+          "description": "Total Volume column; required.",
+          "synonyms": [
+            "total volume"
+          ]
+        },
+        {
+          "name": "basic_rate",
+          "type": "double precision",
+          "description": "Basic Rate column; required.",
+          "synonyms": [
+            "basic rate"
+          ]
+        },
+        {
+          "name": "basic_rate_amount",
+          "type": "double precision",
+          "description": "Basic Rate Amount column; required.",
+          "synonyms": [
+            "basic rate amount"
+          ]
+        },
+        {
+          "name": "price_level_date",
+          "type": "character varying",
+          "description": "Price Level Date column; max length 255.",
+          "synonyms": [
+            "price level date"
+          ]
+        },
+        {
+          "name": "percentage_rate",
+          "type": "character varying",
+          "description": "Percentage Rate column; max length 255.",
+          "synonyms": [
+            "percentage rate"
+          ]
+        },
+        {
+          "name": "tax_group",
+          "type": "integer",
+          "description": "Tax Group column.",
+          "synonyms": [
+            "tax group"
+          ]
+        }
+      ],
+      "joins": [],
+      "examples": []
+    },
+    {
+      "name": "sales_returns",
+      "description": "Sales Returns table from schema public.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "description": "Id column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "average_liter_rate",
+          "type": "double precision",
+          "description": "Average Liter Rate column.",
+          "synonyms": [
+            "average liter rate"
+          ]
+        },
+        {
+          "name": "batch_no",
+          "type": "character varying",
+          "description": "Batch No column; max length 255.",
+          "synonyms": [
+            "batch no"
+          ]
+        },
+        {
+          "name": "created_by",
+          "type": "integer",
+          "description": "Created By column; required.",
+          "synonyms": [
+            "created by"
+          ]
+        },
+        {
+          "name": "created_name",
+          "type": "character varying",
+          "description": "Created Name column; max length 255.",
+          "synonyms": [
+            "created name"
+          ]
+        },
+        {
+          "name": "inv_id",
+          "type": "bigint",
+          "description": "Inv Id column.",
+          "synonyms": [
+            "inv id"
+          ]
+        },
+        {
+          "name": "invoice_date",
+          "type": "date",
+          "description": "Invoice Date column.",
+          "synonyms": [
+            "invoice date"
+          ]
+        },
+        {
+          "name": "invoice_number",
+          "type": "character varying",
+          "description": "Invoice Number column; max length 255.",
+          "synonyms": [
+            "invoice number"
+          ]
+        },
+        {
+          "name": "sales_return_date",
+          "type": "date",
+          "description": "Sales Return Date column.",
+          "synonyms": [
+            "sales return date"
+          ]
+        },
+        {
+          "name": "sales_return_number",
+          "type": "character varying",
+          "description": "Sales Return Number column; max length 255.",
+          "synonyms": [
+            "sales return number"
+          ]
+        },
+        {
+          "name": "status",
+          "type": "character varying",
+          "description": "Status column; max length 255.",
+          "synonyms": []
+        },
+        {
+          "name": "total_amount",
+          "type": "double precision",
+          "description": "Total Amount column.",
+          "synonyms": [
+            "total amount"
+          ]
+        },
+        {
+          "name": "total_box_quantity",
+          "type": "integer",
+          "description": "Total Box Quantity column.",
+          "synonyms": [
+            "total box quantity"
+          ]
+        },
+        {
+          "name": "total_liters",
+          "type": "double precision",
+          "description": "Total Liters column.",
+          "synonyms": [
+            "total liters"
+          ]
+        },
+        {
+          "name": "customer_party_id",
+          "type": "integer",
+          "description": "Customer Party Id column; required.",
+          "synonyms": [
+            "customer party id"
+          ]
+        },
+        {
+          "name": "created_party_id",
+          "type": "integer",
+          "description": "Created Party Id column; required.",
+          "synonyms": [
+            "created party id"
+          ]
+        },
+        {
+          "name": "discount_per",
+          "type": "integer",
+          "description": "Discount Per column; required.",
+          "synonyms": [
+            "discount per"
+          ]
+        },
+        {
+          "name": "grand_total_wo_spl_disc",
+          "type": "double precision",
+          "description": "Grand Total Wo Spl Disc column; required.",
+          "synonyms": [
+            "grand total wo spl disc"
+          ]
+        },
+        {
+          "name": "scheme_based_on",
+          "type": "character varying",
+          "description": "Scheme Based On column; max length 255.",
+          "synonyms": [
+            "scheme based on"
+          ]
+        },
+        {
+          "name": "scheme_discounted_amount",
+          "type": "double precision",
+          "description": "Scheme Discounted Amount column; required.",
+          "synonyms": [
+            "scheme discounted amount"
+          ]
+        },
+        {
+          "name": "scheme_disper_amt",
+          "type": "double precision",
+          "description": "Scheme Disper Amt column; required.",
+          "synonyms": [
+            "scheme disper amount",
+            "scheme disper amt"
+          ]
+        },
+        {
+          "name": "scheme_id",
+          "type": "bigint",
+          "description": "Scheme Id column.",
+          "synonyms": [
+            "scheme id"
+          ]
+        },
+        {
+          "name": "scheme_name",
+          "type": "character varying",
+          "description": "Scheme Name column; max length 255.",
+          "synonyms": [
+            "scheme name"
+          ]
+        },
+        {
+          "name": "spl_discount",
+          "type": "double precision",
+          "description": "Spl Discount column; required.",
+          "synonyms": [
+            "spl discount"
+          ]
+        },
+        {
+          "name": "spl_discount_based_on",
+          "type": "character varying",
+          "description": "Spl Discount Based On column; max length 255.",
+          "synonyms": [
+            "spl discount based on"
+          ]
+        },
+        {
+          "name": "return_remarks",
+          "type": "character varying",
+          "description": "Return Remarks column; max length 255.",
+          "synonyms": [
+            "return remarks"
+          ]
+        },
+        {
+          "name": "total_grand_amount",
+          "type": "double precision",
+          "description": "Total Grand Amount column; required.",
+          "synonyms": [
+            "total grand amount"
+          ]
+        },
+        {
+          "name": "total_gst_amount",
+          "type": "double precision",
+          "description": "Total Gst Amount column; required.",
+          "synonyms": [
+            "total gst amount",
+            "total tax amount"
+          ]
+        },
+        {
+          "name": "tcs_tax_amount",
+          "type": "double precision",
+          "description": "Tcs Tax Amount column; required.",
+          "synonyms": [
+            "tcs tax amount"
+          ]
+        },
+        {
+          "name": "ack_date",
+          "type": "timestamp without time zone",
+          "description": "Ack Date column.",
+          "synonyms": [
+            "ack date"
+          ]
+        },
+        {
+          "name": "ack_no",
+          "type": "character varying",
+          "description": "Ack No column; max length 255.",
+          "synonyms": [
+            "ack no"
+          ]
+        },
+        {
+          "name": "irn_number",
+          "type": "character varying",
+          "description": "Irn Number column; max length 255.",
+          "synonyms": [
+            "irn number"
+          ]
+        },
+        {
+          "name": "return_edate",
+          "type": "timestamp without time zone",
+          "description": "Return Edate column.",
+          "synonyms": [
+            "return edate"
+          ]
+        },
+        {
+          "name": "signed_qr_code",
+          "type": "text",
+          "description": "Signed Qr Code column.",
+          "synonyms": [
+            "signed qr code"
+          ]
+        },
+        {
+          "name": "created_party_name",
+          "type": "character varying",
+          "description": "Created Party Name column; max length 255.",
+          "synonyms": [
+            "created party name"
+          ]
+        },
+        {
+          "name": "customer_party_name",
+          "type": "character varying",
+          "description": "Customer Party Name column; max length 255.",
+          "synonyms": [
+            "customer party name"
+          ]
+        },
+        {
+          "name": "total_amt_with_disc",
+          "type": "double precision",
+          "description": "Total Amt With Disc column.",
+          "synonyms": [
+            "total amount with disc",
+            "total amt with disc"
+          ]
+        },
+        {
+          "name": "created_psr_id",
+          "type": "integer",
+          "description": "Created Psr Id column; required.",
+          "synonyms": [
+            "created psr id"
+          ]
+        },
+        {
+          "name": "customer_psr_id",
+          "type": "integer",
+          "description": "Customer Psr Id column; required.",
+          "synonyms": [
+            "customer psr id"
+          ]
+        },
+        {
+          "name": "without_grn_flag",
+          "type": "integer",
+          "description": "Without Grn Flag column; required.",
+          "synonyms": [
+            "without grn flag"
+          ]
+        },
+        {
+          "name": "common_discount",
+          "type": "integer",
+          "description": "Common Discount column.",
+          "synonyms": [
+            "common discount"
+          ]
+        },
+        {
+          "name": "common_discount_flag",
+          "type": "character varying",
+          "description": "Common Discount Flag column; max length 255.",
+          "synonyms": [
+            "common discount flag"
+          ]
+        },
+        {
+          "name": "total_free_qty",
+          "type": "integer",
+          "description": "Total Free Qty column; required.",
+          "synonyms": [
+            "total free qty",
+            "total free quantity"
+          ]
+        },
+        {
+          "name": "total_free_qty_amount",
+          "type": "double precision",
+          "description": "Total Free Qty Amount column; required.",
+          "synonyms": [
+            "total free qty amount",
+            "total free quantity amount"
+          ]
+        },
+        {
+          "name": "crate_qty",
+          "type": "integer",
+          "description": "Crate Qty column; required.",
+          "synonyms": [
+            "crate qty",
+            "crate quantity"
+          ]
+        },
+        {
+          "name": "sales_executive_id",
+          "type": "integer",
+          "description": "Sales Executive Id column; required.",
+          "synonyms": [
+            "sales executive id"
+          ]
+        },
+        {
+          "name": "sales_head_id",
+          "type": "integer",
+          "description": "Sales Head Id column; required.",
+          "synonyms": [
+            "sales head id"
+          ]
+        },
+        {
+          "name": "zonal_head_id",
+          "type": "integer",
+          "description": "Zonal Head Id column; required.",
+          "synonyms": [
+            "zonal head id"
+          ]
+        },
+        {
+          "name": "total_free_qty_basic_amount",
+          "type": "double precision",
+          "description": "Total Free Qty Basic Amount column; required.",
+          "synonyms": [
+            "total free qty basic amount",
+            "total free quantity basic amount"
+          ]
+        },
+        {
+          "name": "percentage_rate",
+          "type": "character varying",
+          "description": "Percentage Rate column; max length 255.",
+          "synonyms": [
+            "percentage rate"
+          ]
+        }
+      ],
+      "joins": [],
+      "examples": []
+    },
+    {
+      "name": "user_type",
+      "description": "User Type table from schema public.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "description": "Id column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "main_access",
+          "type": "character varying",
+          "description": "Main Access column; max length 255.",
+          "synonyms": [
+            "main access"
+          ]
+        },
+        {
+          "name": "sub_main_access",
+          "type": "text",
+          "description": "Sub Main Access column.",
+          "synonyms": [
+            "sub main access"
+          ]
+        },
+        {
+          "name": "user_type_name",
+          "type": "character varying",
+          "description": "User Type Name column; max length 255.",
+          "synonyms": [
+            "user type name"
+          ]
+        }
+      ],
+      "joins": [],
+      "examples": []
+    },
+    {
+      "name": "item_inward_outward",
+      "description": "Item Inward Outward table from schema public.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer",
+          "description": "Id column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "closing_amount",
+          "type": "double precision",
+          "description": "Closing Amount column; required.",
+          "synonyms": [
+            "closing amount"
+          ]
+        },
+        {
+          "name": "closing_qty",
+          "type": "integer",
+          "description": "Closing Qty column; required.",
+          "synonyms": [
+            "closing qty",
+            "closing quantity"
+          ]
+        },
+        {
+          "name": "closing_rate",
+          "type": "double precision",
+          "description": "Closing Rate column; required.",
+          "synonyms": [
+            "closing rate"
+          ]
+        },
+        {
+          "name": "date",
+          "type": "date",
+          "description": "Date column.",
+          "synonyms": []
+        },
+        {
+          "name": "inward_amount",
+          "type": "double precision",
+          "description": "Inward Amount column; required.",
+          "synonyms": [
+            "inward amount"
+          ]
+        },
+        {
+          "name": "inward_qty",
+          "type": "integer",
+          "description": "Inward Qty column; required.",
+          "synonyms": [
+            "inward qty",
+            "inward quantity"
+          ]
+        },
+        {
+          "name": "inward_rate",
+          "type": "double precision",
+          "description": "Inward Rate column; required.",
+          "synonyms": [
+            "inward rate"
+          ]
+        },
+        {
+          "name": "outward_amount",
+          "type": "double precision",
+          "description": "Outward Amount column; required.",
+          "synonyms": [
+            "outward amount"
+          ]
+        },
+        {
+          "name": "outward_qty",
+          "type": "integer",
+          "description": "Outward Qty column; required.",
+          "synonyms": [
+            "outward qty",
+            "outward quantity"
+          ]
+        },
+        {
+          "name": "outward_rate",
+          "type": "double precision",
+          "description": "Outward Rate column; required.",
+          "synonyms": [
+            "outward rate"
+          ]
+        },
+        {
+          "name": "party_id",
+          "type": "integer",
+          "description": "Party Id column; required.",
+          "synonyms": [
+            "party id"
+          ]
+        },
+        {
+          "name": "party_name",
+          "type": "character varying",
+          "description": "Party Name column; max length 255.",
+          "synonyms": [
+            "party name"
+          ]
+        },
+        {
+          "name": "product_id",
+          "type": "integer",
+          "description": "Product Id column; required.",
+          "synonyms": [
+            "product id"
+          ]
+        },
+        {
+          "name": "voucher_name",
+          "type": "character varying",
+          "description": "Voucher Name column; max length 255.",
+          "synonyms": [
+            "voucher name"
+          ]
+        },
+        {
+          "name": "voucher_type",
+          "type": "character varying",
+          "description": "Voucher Type column; max length 255.",
+          "synonyms": [
+            "voucher type"
+          ]
+        },
+        {
+          "name": "seller_party_id",
+          "type": "integer",
+          "description": "Seller Party Id column; required.",
+          "synonyms": [
+            "seller party id"
+          ]
+        },
+        {
+          "name": "seller_party_name",
+          "type": "character varying",
+          "description": "Seller Party Name column; max length 255.",
+          "synonyms": [
+            "seller party name"
+          ]
+        }
+      ],
+      "joins": [],
+      "examples": []
+    },
+    {
+      "name": "incentive",
+      "description": "Incentive table from schema public.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "description": "Id column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "apply_same_incentive_for_all",
+          "type": "boolean",
+          "description": "Apply Same Incentive For All column.",
+          "synonyms": [
+            "apply same incentive for all"
+          ]
+        },
+        {
+          "name": "assigned_roles",
+          "type": "character varying",
+          "description": "Assigned Roles column; max length 255.",
+          "synonyms": [
+            "assigned roles"
+          ]
+        },
+        {
+          "name": "avg_liter_rate",
+          "type": "double precision",
+          "description": "Avg Liter Rate column; required.",
+          "synonyms": [
+            "avg liter rate"
+          ]
+        },
+        {
+          "name": "considered_liters",
+          "type": "double precision",
+          "description": "Considered Liters column; required.",
+          "synonyms": [
+            "considered liters"
+          ]
+        },
+        {
+          "name": "created_by",
+          "type": "integer",
+          "description": "Created By column; required.",
+          "synonyms": [
+            "created by"
+          ]
+        },
+        {
+          "name": "created_time",
+          "type": "timestamp without time zone",
+          "description": "Created Time column.",
+          "synonyms": [
+            "created time"
+          ]
+        },
+        {
+          "name": "distributor",
+          "type": "text",
+          "description": "Distributor column.",
+          "synonyms": []
+        },
+        {
+          "name": "incentive_amount",
+          "type": "double precision",
+          "description": "Incentive Amount column; required.",
+          "synonyms": [
+            "incentive amount"
+          ]
+        },
+        {
+          "name": "incentive_based_on",
+          "type": "character varying",
+          "description": "Incentive Based On column; max length 255.",
+          "synonyms": [
+            "incentive based on"
+          ]
+        },
+        {
+          "name": "incentive_created_date",
+          "type": "date",
+          "description": "Incentive Created Date column.",
+          "synonyms": [
+            "incentive created date"
+          ]
+        },
+        {
+          "name": "incentive_for",
+          "type": "character varying",
+          "description": "Incentive For column; max length 255.",
+          "synonyms": [
+            "incentive for"
+          ]
+        },
+        {
+          "name": "incentive_name",
+          "type": "character varying",
+          "description": "Incentive Name column; max length 255.",
+          "synonyms": [
+            "incentive name"
+          ]
+        },
+        {
+          "name": "include_sscnfsdis",
+          "type": "boolean",
+          "description": "Include Sscnfsdis column.",
+          "synonyms": [
+            "include sscnfsdis"
+          ]
+        },
+        {
+          "name": "ss_cnfsdis",
+          "type": "text",
+          "description": "Ss Cnfsdis column.",
+          "synonyms": [
+            "ss cnfsdis"
+          ]
+        },
+        {
+          "name": "target_sku",
+          "type": "double precision",
+          "description": "Target Sku column; required.",
+          "synonyms": [
+            "target sku"
+          ]
+        },
+        {
+          "name": "avg_liter_incentive_amount",
+          "type": "double precision",
+          "description": "Avg Liter Incentive Amount column; required.",
+          "synonyms": [
+            "avg liter incentive amount"
+          ]
+        },
+        {
+          "name": "avg_liter_incentive_target",
+          "type": "double precision",
+          "description": "Avg Liter Incentive Target column; required.",
+          "synonyms": [
+            "avg liter incentive target"
+          ]
+        },
+        {
+          "name": "incentive_end_date",
+          "type": "date",
+          "description": "Incentive End Date column.",
+          "synonyms": [
+            "incentive end date"
+          ]
+        },
+        {
+          "name": "incentive_start_date",
+          "type": "date",
+          "description": "Incentive Start Date column.",
+          "synonyms": [
+            "incentive start date"
+          ]
+        },
+        {
+          "name": "liter_incentive_amount",
+          "type": "double precision",
+          "description": "Liter Incentive Amount column; required.",
+          "synonyms": [
+            "liter incentive amount"
+          ]
+        },
+        {
+          "name": "liter_incentive_target",
+          "type": "double precision",
+          "description": "Liter Incentive Target column; required.",
+          "synonyms": [
+            "liter incentive target"
+          ]
+        },
+        {
+          "name": "total_achievement",
+          "type": "double precision",
+          "description": "Total Achievement column; required.",
+          "synonyms": [
+            "total achievement"
+          ]
+        },
+        {
+          "name": "financial_year",
+          "type": "character varying",
+          "description": "Financial Year column; max length 255.",
+          "synonyms": [
+            "financial year"
+          ]
+        },
+        {
+          "name": "month",
+          "type": "character varying",
+          "description": "Month column; max length 255.",
+          "synonyms": []
+        }
+      ],
+      "joins": [],
+      "examples": []
+    },
+    {
+      "name": "damaged_stock",
+      "description": "Damaged Stock table from schema public.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer",
+          "description": "Id column; required.",
+          "synonyms": []
+        },
+        {
+          "name": "created_by",
+          "type": "integer",
+          "description": "Created By column.",
+          "synonyms": [
+            "created by"
+          ]
+        },
+        {
+          "name": "damgd_stock",
+          "type": "character varying",
+          "description": "Damgd Stock column; max length 255.",
+          "synonyms": [
+            "damgd stock"
+          ]
+        },
+        {
+          "name": "date",
+          "type": "date",
+          "description": "Date column.",
+          "synonyms": []
+        },
+        {
+          "name": "remarks",
+          "type": "character varying",
+          "description": "Remarks column; max length 255.",
+          "synonyms": []
+        },
+        {
+          "name": "totl-amnt",
+          "type": "double precision",
+          "description": "Totl Amnt column.",
+          "synonyms": [
+            "total amount",
+            "totl amnt"
+          ]
+        },
+        {
+          "name": "totl_qty",
+          "type": "double precision",
+          "description": "Totl Qty column.",
+          "synonyms": [
+            "total quantity",
+            "totl qty"
+          ]
+        },
+        {
+          "name": "id_party",
+          "type": "integer",
+          "description": "Id Party column.",
+          "synonyms": [
+            "id party"
+          ]
+        },
+        {
+          "name": "party_id",
+          "type": "integer",
+          "description": "Party Id column; required.",
+          "synonyms": [
+            "party id"
+          ]
+        },
+        {
+          "name": "total_amount",
+          "type": "double precision",
+          "description": "Total Amount column; required.",
+          "synonyms": [
+            "total amount"
+          ]
+        },
+        {
+          "name": "total_qty",
+          "type": "integer",
+          "description": "Total Qty column; required.",
+          "synonyms": [
+            "total qty",
+            "total quantity"
+          ]
+        },
+        {
+          "name": "wastage_type",
+          "type": "character varying",
+          "description": "Wastage Type column; max length 255.",
+          "synonyms": [
+            "wastage type"
+          ]
+        },
+        {
+          "name": "damage_number",
+          "type": "character varying",
+          "description": "Damage Number column; max length 255.",
+          "synonyms": [
+            "damage number"
+          ]
+        }
+      ],
+      "joins": [],
+      "examples": []
+    }
+  ]
+}
