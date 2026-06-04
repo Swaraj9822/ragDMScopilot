@@ -21,20 +21,27 @@ class S3ArtifactStore:
     def bucket(self) -> str:
         return self._bucket
 
-    def put_pdf(self, document_id: str, version: str, content: bytes) -> str:
-        key = raw_pdf_key(document_id, version)
+    def put_raw(self, document_id: str, version: str, filename: str, content: bytes) -> str:
+        key = raw_document_key(document_id, version, filename)
         logger.info(
-            "Uploading PDF to s3://%s/%s (%d bytes)",
+            "Uploading document to s3://%s/%s (%d bytes)",
             self._bucket,
             key,
             len(content),
             extra={"document_id": document_id, "version": version, "s3_key": key},
         )
-        self._put_bytes(key, content, "application/pdf")
+        self._put_bytes(key, content, "application/octet-stream")
         return f"s3://{self._bucket}/{key}"
 
+    # Backward-compatible alias
+    def put_pdf(self, document_id: str, version: str, content: bytes, filename: str = "document.pdf") -> str:
+        return self.put_raw(document_id, version, filename, content)
+
+    def get_raw(self, document_id: str, version: str, filename: str) -> bytes:
+        return self.get_bytes(raw_document_key(document_id, version, filename))
+
     def get_pdf(self, document_id: str, version: str) -> bytes:
-        return self.get_bytes(raw_pdf_key(document_id, version))
+        return self.get_bytes(raw_document_key(document_id, version, "source.pdf"))
 
     def put_json(self, key: str, payload: object) -> str:
         logger.debug("Writing JSON to s3://%s/%s", self._bucket, key, extra={"s3_key": key})
@@ -97,8 +104,16 @@ class S3ArtifactStore:
         logger.debug("S3 put complete: %s (%d bytes)", key, len(content), extra={"s3_key": key})
 
 
+def raw_document_key(document_id: str, version: str, filename: str) -> str:
+    """Return the S3 key for a raw uploaded document, preserving original extension."""
+    from pathlib import Path
+    suffix = Path(filename).suffix or ".bin"
+    return f"raw/{document_id}/{version}/source{suffix}"
+
+
+# Backward-compatible alias
 def raw_pdf_key(document_id: str, version: str) -> str:
-    return f"raw/{document_id}/{version}/source.pdf"
+    return raw_document_key(document_id, version, "source.pdf")
 
 
 def parsed_key(document_id: str, version: str) -> str:

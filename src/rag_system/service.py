@@ -97,8 +97,12 @@ class RagService:
             self._generator = BedrockNemotronGenerator(self._settings)
         return self._generator
 
+    async def queue_document(self, filename: str, content: bytes) -> DocumentRecord:
+        return await self._queue_document(str(uuid.uuid4()), filename, content)
+
+    # Backward-compatible alias
     async def queue_pdf(self, filename: str, content: bytes) -> DocumentRecord:
-        return await self._queue_pdf(str(uuid.uuid4()), filename, content)
+        return await self.queue_document(filename, content)
 
     async def update_document(self, document_id: str, filename: str, content: bytes) -> DocumentRecord | None:
         current = self.get_document(document_id)
@@ -107,7 +111,7 @@ class RagService:
 
         with timed(logger, "Pinecone document delete before update", document_id=document_id):
             self.index.delete_document(document_id)
-        return await self._queue_pdf(document_id, filename, content)
+        return await self._queue_document(document_id, filename, content)
 
     def delete_document(self, document_id: str) -> DocumentRecord | None:
         record = self.get_document(document_id)
@@ -124,7 +128,7 @@ class RagService:
         logger.info("Document deleted", extra={"document_id": document_id, "version": record.version})
         return deleted
 
-    async def _queue_pdf(self, document_id: str, filename: str, content: bytes) -> DocumentRecord:
+    async def _queue_document(self, document_id: str, filename: str, content: bytes) -> DocumentRecord:
         version = content_hash(content)
         log_extra: dict[str, Any] = {
             "document_id": document_id,
@@ -134,10 +138,10 @@ class RagService:
         if trace_id := get_trace_id():
             log_extra["trace_id"] = trace_id
         logger.info(
-            "Queueing PDF ingestion: %s (%d bytes)", filename, len(content), extra=log_extra
+            "Queueing document ingestion: %s (%d bytes)", filename, len(content), extra=log_extra
         )
 
-        s3_uri = self._store.put_pdf(document_id, version, content)
+        s3_uri = self._store.put_raw(document_id, version, filename, content)
         record = DocumentRecord(
             id=document_id,
             title=filename,
@@ -167,11 +171,15 @@ class RagService:
             raise
 
         metrics.increment("rag_documents_queued_total")
-        logger.info("PDF ingestion queued for %s", filename, extra=log_extra)
+        logger.info("Document ingestion queued for %s", filename, extra=log_extra)
         return record
 
+    async def ingest_document(self, filename: str, content: bytes) -> DocumentRecord:
+        return await self.queue_document(filename, content)
+
+    # Backward-compatible alias
     async def ingest_pdf(self, filename: str, content: bytes) -> DocumentRecord:
-        return await self.queue_pdf(filename, content)
+        return await self.queue_document(filename, content)
 
     async def process_document_job(self, job: IngestionJob) -> DocumentRecord:
         record = self.get_document(job.document_id)
@@ -186,13 +194,17 @@ class RagService:
             )
 
         try:
-            content = self._store.get_pdf(job.document_id, job.version)
-        except Exception as exc:
-            failed = record.model_copy(
-                update={"status": DocumentStatus.failed, "error": str(exc)}
-            )
-            self._save_document_record(failed)
-            raise
+            content = self._store.get_raw(job.document_id, job.version, job.filename)
+        except Exception:
+            # Fallback: try legacy pdf key for documents ingested before this fix
+            try:
+                content = self._store.get_pdf(job.document_id, job.version)
+            except Exception as exc:
+                failed = record.model_copy(
+                    update={"status": DocumentStatus.failed, "error": str(exc)}
+                )
+                self._save_document_record(failed)
+                raise
         return await self._run_ingestion(record, content)
 
     async def _run_ingestion(self, record: DocumentRecord, content: bytes) -> DocumentRecord:

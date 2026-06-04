@@ -1,7 +1,8 @@
 """Document parsing — multi-format support for the RAG ingestion pipeline.
 
 Supported formats:
-    LlamaParse  : PDF, DOCX, DOC, PPTX, PPT, images (JPG, PNG, TIFF, BMP, WebP, GIF)
+    LlamaParse  : PDF, DOCX, DOC, PPTX, PPT, ODT, RTF, EPUB, XML, XLS,
+                  images (JPG, PNG, TIFF, BMP, WebP, GIF)
     Spreadsheet : XLSX, CSV
     HTML        : HTML, HTM
     Text        : TXT, MD, Markdown, RST
@@ -27,7 +28,13 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 LLAMAPARSE_EXTENSIONS = frozenset({
-    ".pdf", ".docx", ".doc", ".pptx", ".ppt",
+    # Office documents
+    ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".odt", ".rtf", ".epub",
+    # Spreadsheets handled by LlamaParse (XLS legacy; XLSX/CSV go to SpreadsheetParser)
+    ".xls",
+    # Structured data
+    ".xml",
+    # Images (OCR via LlamaParse)
     ".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp", ".gif",
 })
 SPREADSHEET_EXTENSIONS = frozenset({".xlsx", ".csv"})
