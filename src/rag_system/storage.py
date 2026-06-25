@@ -34,7 +34,9 @@ class S3ArtifactStore:
         return f"s3://{self._bucket}/{key}"
 
     # Backward-compatible alias
-    def put_pdf(self, document_id: str, version: str, content: bytes, filename: str = "document.pdf") -> str:
+    def put_pdf(
+        self, document_id: str, version: str, content: bytes, filename: str = "document.pdf"
+    ) -> str:
         return self.put_raw(document_id, version, filename, content)
 
     def get_raw(self, document_id: str, version: str, filename: str) -> bytes:
@@ -107,6 +109,7 @@ class S3ArtifactStore:
 def raw_document_key(document_id: str, version: str, filename: str) -> str:
     """Return the S3 key for a raw uploaded document, preserving original extension."""
     from pathlib import Path
+
     suffix = Path(filename).suffix or ".bin"
     return f"raw/{document_id}/{version}/source{suffix}"
 

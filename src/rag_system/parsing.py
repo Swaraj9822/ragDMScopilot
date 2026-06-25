@@ -27,21 +27,39 @@ logger = get_logger(__name__)
 # Supported format groups
 # ---------------------------------------------------------------------------
 
-LLAMAPARSE_EXTENSIONS = frozenset({
-    # Office documents
-    ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".odt", ".rtf", ".epub",
-    # Spreadsheets handled by LlamaParse (XLS legacy; XLSX/CSV go to SpreadsheetParser)
-    ".xls",
-    # Structured data
-    ".xml",
-    # Images (OCR via LlamaParse)
-    ".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp", ".gif",
-})
+LLAMAPARSE_EXTENSIONS = frozenset(
+    {
+        # Office documents
+        ".pdf",
+        ".docx",
+        ".doc",
+        ".pptx",
+        ".ppt",
+        ".odt",
+        ".rtf",
+        ".epub",
+        # Spreadsheets handled by LlamaParse (XLS legacy; XLSX/CSV go to SpreadsheetParser)
+        ".xls",
+        # Structured data
+        ".xml",
+        # Images (OCR via LlamaParse)
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".tiff",
+        ".tif",
+        ".bmp",
+        ".webp",
+        ".gif",
+    }
+)
 SPREADSHEET_EXTENSIONS = frozenset({".xlsx", ".csv"})
 HTML_EXTENSIONS = frozenset({".html", ".htm"})
 TEXT_EXTENSIONS = frozenset({".txt", ".md", ".markdown", ".rst"})
 
-SUPPORTED_EXTENSIONS = LLAMAPARSE_EXTENSIONS | SPREADSHEET_EXTENSIONS | HTML_EXTENSIONS | TEXT_EXTENSIONS
+SUPPORTED_EXTENSIONS = (
+    LLAMAPARSE_EXTENSIONS | SPREADSHEET_EXTENSIONS | HTML_EXTENSIONS | TEXT_EXTENSIONS
+)
 
 
 def detect_parser_type(filename: str) -> str:
@@ -56,8 +74,7 @@ def detect_parser_type(filename: str) -> str:
     if ext in TEXT_EXTENSIONS:
         return "text"
     raise ValueError(
-        f"Unsupported file format: '{ext}'. "
-        f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+        f"Unsupported file format: '{ext}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
     )
 
 
@@ -212,8 +229,12 @@ class HtmlParser:
     """Extracts text content from HTML and converts to structured markdown."""
 
     _HEADING_MAP = {
-        "h1": "#", "h2": "##", "h3": "###",
-        "h4": "####", "h5": "#####", "h6": "######",
+        "h1": "#",
+        "h2": "##",
+        "h3": "###",
+        "h4": "####",
+        "h5": "#####",
+        "h6": "######",
     }
 
     async def parse(
@@ -263,8 +284,16 @@ class HtmlParser:
         """Walk the DOM and produce structured markdown."""
         lines: list[str] = []
         content_tags = [
-            "h1", "h2", "h3", "h4", "h5", "h6",
-            "p", "li", "pre", "blockquote",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "p",
+            "li",
+            "pre",
+            "blockquote",
         ]
 
         for element in soup.find_all(content_tags):

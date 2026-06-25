@@ -164,14 +164,15 @@ def _service(
         bedrock_embedding_model_id="embed-model",
         s3_bucket="bucket",
         pinecone_index_name="index",
+        ingestion_max_receive_count=5,
+        pinecone_upsert_batch_size=100,
+        embedding_max_workers=10,
     )
     service._store = store
-    service._documents = {}
     service._parser = parser
     service._chunker = FakeChunker()
     service._embedder = FakeEmbedder()
     service._sparse_encoder = None
     service._index = index
-    service._reranker = None
     service._generator = None
     return service

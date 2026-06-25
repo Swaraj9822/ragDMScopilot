@@ -1,4 +1,5 @@
 import sys
+import contextlib
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -11,6 +12,7 @@ from rag_system.copilot import (
     CopilotSqlGuard,
     CopilotTable,
     DatabaseCopilotService,
+    ExampleQuery,
     PostgresCopilotExecutor,
     SqlValidationError,
     build_database_answer_prompt,
@@ -60,6 +62,7 @@ def test_sql_guard_allows_approved_select_and_adds_limit() -> None:
         "select invoice_date, net_amount from sales_invoice",
         "select id from users",
         "select id from sales_invoice; select id from party",
+        "select max(secret_salary) from party",
     ],
 )
 def test_sql_guard_rejects_unsafe_sql(sql: str) -> None:
@@ -71,11 +74,13 @@ def test_sql_guard_rejects_unsafe_sql(sql: str) -> None:
 
 def test_prompts_include_business_context() -> None:
     sql_prompt = build_sql_prompt("What was total sales today?", _catalog().describe_for_prompt())
-    answer_prompt = build_database_answer_prompt(
+    system_prompt, user_prompt = build_database_answer_prompt(
         "What was total sales today?",
         "select sum(net_amount) as revenue from sales_invoice",
         [{"revenue": 100}],
     )
+    # Combine for backward-compatible assertions
+    answer_prompt = f"{system_prompt}\n{user_prompt}"
 
     assert "PostgreSQL SELECT" in sql_prompt
     assert "sales_invoice" in sql_prompt
@@ -83,6 +88,60 @@ def test_prompts_include_business_context() -> None:
     assert "What was total sales today?" in answer_prompt
     assert '"revenue": 100' in answer_prompt
     assert '"summary"' in answer_prompt
+
+
+def test_sql_prompt_includes_temporal_context() -> None:
+    """The enhanced temporal context should appear in the SQL prompt."""
+    from datetime import date
+
+    sql_prompt = build_sql_prompt("Sales last year?", _catalog().describe_for_prompt())
+
+    today = date.today()
+    assert str(today.year) in sql_prompt
+    assert "Temporal Reference" in sql_prompt
+    assert "Last year" in sql_prompt
+    assert "Financial year" in sql_prompt
+
+
+def test_few_shot_examples_injected_when_present() -> None:
+    """When example_queries exist on tables, they appear in the SQL prompt."""
+    catalog = CopilotSchemaCatalog(
+        tables=[
+            CopilotTable(
+                name="orders",
+                description="Order data.",
+                columns=[CopilotColumn(name="total", type="numeric")],
+                example_queries=[
+                    ExampleQuery(
+                        question="Total order value?",
+                        sql="SELECT SUM(total) FROM orders",
+                    ),
+                ],
+            ),
+        ],
+    )
+    sql_prompt = build_sql_prompt("Revenue?", catalog.describe_for_prompt(), tables=catalog.tables)
+    assert "Few-shot examples" in sql_prompt
+    assert "Total order value?" in sql_prompt
+    assert "SELECT SUM(total) FROM orders" in sql_prompt
+
+
+def test_business_glossary_in_schema_description() -> None:
+    """Business glossary terms should appear in the schema description."""
+    catalog = CopilotSchemaCatalog(
+        tables=[
+            CopilotTable(
+                name="invoices",
+                description="Invoice data.",
+                columns=[CopilotColumn(name="grand_total", type="numeric")],
+            ),
+        ],
+        business_glossary={"revenue": "Use grand_total for revenue (includes taxes)"},
+    )
+    desc = catalog.describe_for_prompt()
+    assert "Business glossary" in desc
+    assert "revenue" in desc
+    assert "grand_total" in desc
 
 
 def test_sql_guard_clamps_large_limits() -> None:
@@ -103,7 +162,7 @@ def test_format_database_answer_uses_fixed_sections() -> None:
     )
 
     assert answer.startswith("Summary:\nRevenue was 100.")
-    assert "Results:\n[\n  {\n    \"revenue\": 100\n  }\n]" in answer
+    assert 'Results:\n[\n  {\n    "revenue": 100\n  }\n]' in answer
     assert "Conclusion:\nRevenue is 100 for the requested period." in answer
 
 
@@ -137,8 +196,29 @@ def test_postgres_executor_sets_timeout_with_set_config(monkeypatch) -> None:
 
     fake_psycopg = SimpleNamespace(connect=fake_connect)
     fake_rows = SimpleNamespace(dict_row=object())
+
+    class FakePool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @contextlib.contextmanager
+        def connection(self):
+            yield fake_connect()
+
+    fake_pool_module = SimpleNamespace(ConnectionPool=FakePool)
+
     monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
     monkeypatch.setitem(sys.modules, "psycopg.rows", fake_rows)
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg.conninfo",
+        SimpleNamespace(
+            make_conninfo=lambda **kw: (
+                "host='localhost' port=5432 dbname='app' user='app' password='secret' sslmode='require'"
+            )
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "psycopg_pool", fake_pool_module)
 
     settings = SimpleNamespace(
         copilot_db_host="localhost",
@@ -168,11 +248,17 @@ def test_postgres_executor_sets_timeout_with_set_config(monkeypatch) -> None:
         None,
     )
     assert calls[4] == ("fetchmany", 25)
-    assert calls[5] == ("rollback",)
+    assert calls[5] == ("execute", "ROLLBACK", None)
 
 
 class FakeGenerator:
-    def generate_sql(self, question, catalog):
+    def check_intent(self, question):
+        pass
+
+    def select_tables(self, question, catalog):
+        return catalog.tables
+
+    def generate_sql(self, question, catalog, selected_tables=None, error_msg=None):
         assert "sales" in question.lower()
         return "select sum(net_amount) as revenue from sales_invoice"
 
@@ -181,13 +267,20 @@ class FakeGenerator:
 
 
 class FakeExecutor:
-    def execute(self, sql):
+    def execute(self, sql, user_id=None):
         assert "sum(net_amount)" in sql
         return [{"revenue": 1250}]
 
 
 def test_copilot_api_query_with_mocked_dependencies(monkeypatch) -> None:
-    service = DatabaseCopilotService(SimpleNamespace(copilot_max_rows=25))
+    service = DatabaseCopilotService(
+        SimpleNamespace(
+            copilot_max_rows=25,
+            copilot_schema_catalog_path="dummy.json",
+            copilot_sql_max_attempts=3,
+            copilot_schema_catalog_s3_uri=None,
+        )
+    )
     service._catalog = _catalog()
     service._guard = CopilotSqlGuard(service._catalog, max_rows=25)
     service._generator = FakeGenerator()

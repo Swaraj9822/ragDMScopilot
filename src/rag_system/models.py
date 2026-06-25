@@ -62,8 +62,8 @@ class RetrievalHit(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    question: str = Field(min_length=1)
-    document_ids: list[str] | None = None
+    question: str = Field(min_length=1, max_length=10000)
+    document_ids: list[str] | None = Field(default=None, max_length=50)
 
 
 class QueryResponse(BaseModel):
@@ -74,8 +74,9 @@ class QueryResponse(BaseModel):
 
 
 class CopilotQueryRequest(BaseModel):
-    question: str = Field(min_length=1)
+    question: str = Field(min_length=1, max_length=10000)
     include_sql: bool = False
+    user_id: str | None = None
 
 
 class CopilotDataSource(BaseModel):
@@ -95,9 +96,10 @@ class CopilotQueryResponse(BaseModel):
 
 
 class UnifiedQueryRequest(BaseModel):
-    question: str = Field(min_length=1)
-    document_ids: list[str] | None = None
+    question: str = Field(min_length=1, max_length=10000)
+    document_ids: list[str] | None = Field(default=None, max_length=50)
     include_sql: bool = False
+    user_id: str | None = None
 
 
 class UnifiedQueryResponse(BaseModel):
@@ -110,4 +112,3 @@ class UnifiedQueryResponse(BaseModel):
     rows: list[dict[str, Any]] = Field(default_factory=list)
     data_sources: list[CopilotDataSource] = Field(default_factory=list)
     routing_reasoning: str | None = None
-

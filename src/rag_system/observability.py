@@ -10,6 +10,9 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
+from enum import StrEnum as _StrEnum
+from functools import wraps as _wraps
+import threading
 from threading import RLock
 from typing import Any, Generator
 
@@ -19,6 +22,22 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
+
+
+# ---------------------------------------------------------------------------
+# Request-level timeout error
+# ---------------------------------------------------------------------------
+
+
+class RequestTimeoutError(Exception):
+    """Raised when a request exceeds its configured wall-clock timeout."""
+
+    def __init__(self, operation: str, elapsed_s: float, limit_s: int):
+        self.operation = operation
+        self.elapsed_s = elapsed_s
+        self.limit_s = limit_s
+        super().__init__(f"Request timed out: {operation} took {elapsed_s:.1f}s (limit {limit_s}s)")
+
 
 # ---------------------------------------------------------------------------
 # Structured JSON formatter
@@ -111,6 +130,97 @@ class MetricsRegistry:
         self._sample_sums: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
         self._max_samples = max_samples
 
+        self._cw_client = None
+        self._cw_namespace = os.getenv("RAG_CW_NAMESPACE", "ProductionRAG")
+        self._flush_interval = int(os.getenv("RAG_CW_FLUSH_INTERVAL", "60"))
+        self._thread = None
+        self._running = False
+        self._cw_buffer: list[dict[str, Any]] = []
+
+    def start_cloudwatch_flusher(self, session: Any = None) -> None:
+        with self._lock:
+            if self._running:
+                return
+            if os.getenv("RAG_CW_ENABLED", "").lower() not in ("true", "1", "yes"):
+                return
+
+            try:
+                import boto3
+
+                self._cw_client = (session or boto3.session.Session()).client("cloudwatch")
+                self._running = True
+                self._thread = threading.Thread(
+                    target=self._flush_loop, daemon=True, name="MetricsFlusher"
+                )
+                self._thread.start()
+                logging.getLogger(__name__).info("CloudWatch metrics flusher started")
+            except Exception as e:
+                logging.getLogger(__name__).error(
+                    "Failed to start CloudWatch metrics flusher: %s", e
+                )
+
+    def stop_cloudwatch_flusher(self) -> None:
+        with self._lock:
+            self._running = False
+        if self._thread:
+            self._thread.join(timeout=5.0)
+
+    def _flush_loop(self) -> None:
+        while self._running:
+            time.sleep(self._flush_interval)
+            try:
+                self.flush_to_cloudwatch()
+            except Exception as e:
+                logging.getLogger(__name__).warning("Failed to flush metrics to CloudWatch: %s", e)
+
+    def flush_to_cloudwatch(self) -> None:
+        with self._lock:
+            buffer = self._cw_buffer
+            self._cw_buffer = []
+
+        if not buffer or not self._cw_client:
+            return
+
+        counter_deltas: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
+        sample_aggs: dict[tuple[str, tuple[tuple[str, str], ...]], list[float]] = {}
+
+        for item in buffer:
+            k = (item["name"], item["labels"])
+            if item["type"] == "counter":
+                counter_deltas[k] = counter_deltas.get(k, 0.0) + item["value"]
+            else:
+                if k not in sample_aggs:
+                    sample_aggs[k] = []
+                sample_aggs[k].append(item["value"])
+
+        metric_data = []
+        for (name, labels), value in counter_deltas.items():
+            dimensions = [{"Name": k, "Value": v[:255]} for k, v in labels][:10]
+            metric_data.append(
+                {"MetricName": name, "Dimensions": dimensions, "Value": value, "Unit": "Count"}
+            )
+
+        for (name, labels), values in sample_aggs.items():
+            dimensions = [{"Name": k, "Value": v[:255]} for k, v in labels][:10]
+            metric_data.append(
+                {
+                    "MetricName": name,
+                    "Dimensions": dimensions,
+                    "StatisticValues": {
+                        "SampleCount": len(values),
+                        "Sum": sum(values),
+                        "Minimum": min(values),
+                        "Maximum": max(values),
+                    },
+                    "Unit": "None",
+                }
+            )
+
+        for i in range(0, len(metric_data), 1000):
+            batch = metric_data[i : i + 1000]
+            if batch:
+                self._cw_client.put_metric_data(Namespace=self._cw_namespace, MetricData=batch)
+
     def increment(
         self,
         name: str,
@@ -120,6 +230,10 @@ class MetricsRegistry:
         key = (name, _normalise_labels(labels))
         with self._lock:
             self._counters[key] = self._counters.get(key, 0.0) + amount
+            if self._running:
+                self._cw_buffer.append(
+                    {"name": name, "labels": key[1], "value": amount, "type": "counter"}
+                )
 
     def observe(self, name: str, value: float, labels: dict[str, Any] | None = None) -> None:
         key = (name, _normalise_labels(labels))
@@ -131,6 +245,10 @@ class MetricsRegistry:
                 self._sample_sums[key] -= self._samples[key][0]
             self._samples[key].append(float(value))
             self._sample_sums[key] += float(value)
+            if self._running:
+                self._cw_buffer.append(
+                    {"name": name, "labels": key[1], "value": float(value), "type": "observe"}
+                )
 
     def render_prometheus(self) -> str:
         lines = [
@@ -258,9 +376,7 @@ def get_logger(name: str) -> logging.Logger:
 
 
 @contextmanager
-def timed(
-    logger: logging.Logger, operation: str, **extra: Any
-) -> Generator[None, None, None]:
+def timed(logger: logging.Logger, operation: str, **extra: Any) -> Generator[None, None, None]:
     """Log *operation* start, duration on success, or error with traceback."""
     logger.info("Starting %s", operation, extra=extra)
     t0 = time.perf_counter()
@@ -308,11 +424,179 @@ def retry_on_transient(
     max_retries: int = _MAX_RETRIES,
     min_wait: float = _MIN_WAIT_S,
     max_wait: float = _MAX_WAIT_S,
+    retryable_exceptions: tuple[type[Exception], ...] | None = None,
 ):
     """Tenacity retry with exponential back-off.  Logs each retry at WARNING."""
+    from tenacity import retry_if_exception_type
+
+    if retryable_exceptions is None:
+        try:
+            from botocore.exceptions import BotoCoreError
+            from pinecone import PineconeException
+
+            retryable_exceptions = (ConnectionError, TimeoutError, BotoCoreError, PineconeException)
+        except ImportError:
+            retryable_exceptions = (ConnectionError, TimeoutError)
+
     return retry(
         stop=stop_after_attempt(max_retries),
         wait=wait_exponential(multiplier=1, min=min_wait, max=max_wait),
         before_sleep=before_sleep_log(_retry_logger, logging.WARNING),
+        retry=retry_if_exception_type(retryable_exceptions),
         reraise=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker for external services
+# ---------------------------------------------------------------------------
+
+
+class CircuitState(_StrEnum):
+    closed = "closed"
+    open = "open"
+    half_open = "half_open"
+
+
+class CircuitOpenError(Exception):
+    """Raised when a call is rejected because the circuit breaker is open."""
+
+    def __init__(self, name: str, opened_seconds_ago: float):
+        self.name = name
+        self.opened_seconds_ago = opened_seconds_ago
+        super().__init__(
+            f"Circuit breaker '{name}' is OPEN "
+            f"(opened {opened_seconds_ago:.1f}s ago). Failing fast."
+        )
+
+
+class CircuitBreaker:
+    """Thread-safe circuit breaker with CLOSED → OPEN → HALF_OPEN → CLOSED lifecycle."""
+
+    def __init__(
+        self,
+        name: str,
+        failure_threshold: int = 5,
+        recovery_timeout_s: float = 30.0,
+    ):
+        self.name = name
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout_s = recovery_timeout_s
+
+        self._state = CircuitState.closed
+        self._failure_count = 0
+        self._opened_at: float | None = None
+        self._lock = threading.Lock()
+        self._logger = logging.getLogger(f"rag_system.circuit.{name}")
+
+    @property
+    def state(self) -> CircuitState:
+        with self._lock:
+            return self._effective_state()
+
+    def _effective_state(self) -> CircuitState:
+        """Return effective state, promoting OPEN → HALF_OPEN after cooldown."""
+        if self._state == CircuitState.open and self._opened_at is not None:
+            elapsed = time.perf_counter() - self._opened_at
+            if elapsed >= self.recovery_timeout_s:
+                return CircuitState.half_open
+        return self._state
+
+    def allow_request(self) -> bool:
+        """Check if a request should be allowed through."""
+        with self._lock:
+            effective = self._effective_state()
+            if effective == CircuitState.closed:
+                return True
+            if effective == CircuitState.half_open:
+                # Allow one trial call
+                self._state = CircuitState.half_open
+                return True
+            return False
+
+    def record_success(self) -> None:
+        with self._lock:
+            if self._state in (CircuitState.half_open, CircuitState.open):
+                self._logger.info("Circuit '%s' CLOSED after successful trial call", self.name)
+                metrics.increment(
+                    "rag_circuit_state_total", {"provider": self.name, "state": "closed"}
+                )
+            self._state = CircuitState.closed
+            self._failure_count = 0
+            self._opened_at = None
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._failure_count += 1
+            if self._state == CircuitState.half_open:
+                # Trial call failed — reopen
+                self._state = CircuitState.open
+                self._opened_at = time.perf_counter()
+                self._logger.warning(
+                    "Circuit '%s' re-OPENED after failed trial call (failures=%d)",
+                    self.name,
+                    self._failure_count,
+                )
+                metrics.increment(
+                    "rag_circuit_state_total", {"provider": self.name, "state": "open"}
+                )
+            elif self._failure_count >= self.failure_threshold:
+                self._state = CircuitState.open
+                self._opened_at = time.perf_counter()
+                self._logger.warning(
+                    "Circuit '%s' OPENED after %d consecutive failures",
+                    self.name,
+                    self._failure_count,
+                )
+                metrics.increment(
+                    "rag_circuit_state_total", {"provider": self.name, "state": "open"}
+                )
+
+
+# Registry of named circuit breakers
+_circuit_registry: dict[str, CircuitBreaker] = {}
+_circuit_registry_lock = threading.Lock()
+
+
+def get_circuit_breaker(
+    name: str,
+    failure_threshold: int = 5,
+    recovery_timeout_s: float = 30.0,
+) -> CircuitBreaker:
+    """Get or create a named circuit breaker (singleton per name)."""
+    with _circuit_registry_lock:
+        if name not in _circuit_registry:
+            _circuit_registry[name] = CircuitBreaker(name, failure_threshold, recovery_timeout_s)
+        return _circuit_registry[name]
+
+
+def circuit(
+    name: str,
+    failure_threshold: int = 5,
+    recovery_timeout_s: float = 30.0,
+):
+    """Decorator that wraps a function with a named circuit breaker.
+
+    Place *outside* @retry_on_transient so that an OPEN circuit fails fast
+    without entering the retry/backoff loop.
+    """
+
+    def decorator(fn):
+        @_wraps(fn)
+        def wrapper(*args, **kwargs):
+            cb = get_circuit_breaker(name, failure_threshold, recovery_timeout_s)
+            if not cb.allow_request():
+                opened_ago = time.perf_counter() - cb._opened_at if cb._opened_at else 0.0
+                raise CircuitOpenError(name, opened_ago)
+            try:
+                result = fn(*args, **kwargs)
+            except Exception:
+                cb.record_failure()
+                raise
+            else:
+                cb.record_success()
+                return result
+
+        return wrapper
+
+    return decorator

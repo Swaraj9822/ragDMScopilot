@@ -21,6 +21,7 @@ class ReceivedIngestionJob(BaseModel):
     job: IngestionJob
     receipt_handle: str
     message_id: str | None = None
+    receive_count: int = 0
 
 
 class SqsIngestionQueue:
@@ -51,10 +52,22 @@ class SqsIngestionQueue:
             QueueUrl=self._queue_url,
             MaxNumberOfMessages=max(1, min(10, self._max_messages)),
             WaitTimeSeconds=max(0, min(20, self._poll_seconds)),
+            AttributeNames=["ApproximateReceiveCount"],
         )
         jobs: list[ReceivedIngestionJob] = []
         for message in response.get("Messages", []):
-            jobs.append(_parse_message(message))
+            try:
+                jobs.append(_parse_message(message))
+            except Exception as e:
+                logger.error("Failed to parse message: %s", e, exc_info=True)
+                try:
+                    self._client.delete_message(
+                        QueueUrl=self._queue_url,
+                        ReceiptHandle=message["ReceiptHandle"],
+                    )
+                except Exception as del_e:
+                    logger.error("Failed to delete poison pill message: %s", del_e, exc_info=True)
+                continue
         metrics.observe("rag_ingestion_jobs_received", len(jobs))
         return jobs
 
@@ -73,11 +86,23 @@ class SqsIngestionQueue:
             },
         )
 
+    @retry_on_transient()
+    def extend_visibility(self, receipt_handle: str, timeout_seconds: int) -> None:
+        """Extends the SQS visibility timeout for long-running jobs."""
+        self._client.change_message_visibility(
+            QueueUrl=self._queue_url,
+            ReceiptHandle=receipt_handle,
+            VisibilityTimeout=timeout_seconds,
+        )
+
 
 def _parse_message(message: dict[str, Any]) -> ReceivedIngestionJob:
     payload = json.loads(message["Body"])
+    attributes = message.get("Attributes") or {}
+    receive_count = int(attributes.get("ApproximateReceiveCount", "1"))
     return ReceivedIngestionJob(
         job=IngestionJob.model_validate(payload),
         receipt_handle=message["ReceiptHandle"],
         message_id=message.get("MessageId"),
+        receive_count=receive_count,
     )

@@ -24,3 +24,6 @@ build/
 .vscode/
 .idea/
 *.swp
+
+# Copilot schema catalog (production data — load from local file or S3)
+config/copilot_schema_catalog.json

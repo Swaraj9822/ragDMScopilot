@@ -1,55 +1,11 @@
-from fastapi.testclient import TestClient
-
-from rag_system import api as api_module
 from rag_system.models import DocumentStatus
-from rag_system.service import RagService
 from rag_system.storage import document_record_key
 
 
-class FakeStore:
-    def __init__(self) -> None:
-        self.objects: dict[str, object] = {}
-        self.uploads: list[tuple[str, str, bytes]] = []
-
-    def put_pdf(self, document_id: str, version: str, content: bytes) -> str:
-        self.uploads.append((document_id, version, content))
-        return f"s3://bucket/raw/{document_id}/{version}/source.pdf"
-
-    def put_json(self, key: str, payload: object) -> str:
-        self.objects[key] = payload
-        return f"s3://bucket/{key}"
-
-
-class FakeQueue:
-    def __init__(self) -> None:
-        self.jobs = []
-
-    def enqueue(self, job):
-        self.jobs.append(job)
-        return "message-1"
-
-
-class FakeSettings:
-    max_upload_bytes = 1024
-
-
-class TinyUploadSettings:
-    max_upload_bytes = 32
-
-
-def test_upload_document_queues_ingestion_without_running_pipeline(monkeypatch) -> None:
-    store = FakeStore()
-    queue = FakeQueue()
-    service = object.__new__(RagService)
-    service._store = store
-    service._queue = queue
-    service._documents = {}
-
-    monkeypatch.setattr(api_module, "get_service", lambda: service)
-    monkeypatch.setattr(api_module, "get_settings", lambda: FakeSettings())
-    client = TestClient(api_module.app)
-
-    response = client.post(
+def test_upload_document_queues_ingestion_without_running_pipeline(
+    fastapi_client, mock_store, mock_queue, test_service
+) -> None:
+    response = fastapi_client.post(
         "/documents",
         files={"file": ("source.pdf", b"%PDF-1.4", "application/pdf")},
     )
@@ -60,95 +16,66 @@ def test_upload_document_queues_ingestion_without_running_pipeline(monkeypatch) 
     assert body["title"] == "source.pdf"
     assert body["s3_uri"].startswith("s3://bucket/raw/")
 
-    assert len(store.uploads) == 1
+    assert len(mock_store.uploads) == 1
     document_id = body["id"]
-    record_payload = store.objects[document_record_key(document_id)]
+    record_payload = mock_store.objects[document_record_key(document_id)]
     assert record_payload["status"] == DocumentStatus.queued
 
-    assert len(queue.jobs) == 1
-    job = queue.jobs[0]
+    assert len(mock_queue.jobs) == 1
+    job = mock_queue.jobs[0]
     assert job.document_id == document_id
     assert job.version == body["version"]
     assert job.filename == "source.pdf"
     assert job.s3_uri == body["s3_uri"]
 
-    assert not hasattr(service, "_parser")
-    assert not hasattr(service, "_embedder")
-    assert not hasattr(service, "_index")
+    assert not hasattr(test_service, "_parser")
+    assert not hasattr(test_service, "_embedder")
+    assert not hasattr(test_service, "_index")
 
 
-def test_upload_document_rejects_file_over_size_limit(monkeypatch) -> None:
-    store = FakeStore()
-    queue = FakeQueue()
-    service = object.__new__(RagService)
-    service._store = store
-    service._queue = queue
-    service._documents = {}
+def test_upload_document_rejects_file_over_size_limit(
+    fastapi_client, test_settings, mock_store, mock_queue
+) -> None:
+    test_settings.max_upload_bytes = 32
 
-    monkeypatch.setattr(api_module, "get_service", lambda: service)
-    monkeypatch.setattr(api_module, "get_settings", lambda: TinyUploadSettings())
-    client = TestClient(api_module.app)
-
-    response = client.post(
+    response = fastapi_client.post(
         "/documents",
         files={"file": ("source.pdf", b"%PDF-1.4" + (b"x" * 64), "application/pdf")},
     )
 
     assert response.status_code == 413
     assert "Maximum size is 32 bytes" in response.json()["detail"]
-    assert store.uploads == []
-    assert queue.jobs == []
+    assert mock_store.uploads == []
+    assert mock_queue.jobs == []
 
 
 def test_upload_document_rejects_upload_when_multipart_request_exceeds_size_limit(
-    monkeypatch,
+    fastapi_client, test_settings, mock_store, mock_queue
 ) -> None:
-    store = FakeStore()
-    queue = FakeQueue()
-    service = object.__new__(RagService)
-    service._store = store
-    service._queue = queue
-    service._documents = {}
+    test_settings.max_upload_bytes = 32
 
-    monkeypatch.setattr(api_module, "get_service", lambda: service)
-    monkeypatch.setattr(api_module, "get_settings", lambda: TinyUploadSettings())
-    client = TestClient(api_module.app)
-
-    response = client.post(
+    response = fastapi_client.post(
         "/documents",
         files={"file": ("source.pdf", b"%PDF-1.4", "application/pdf")},
     )
 
     assert response.status_code == 413
-    assert store.uploads == []
-    assert queue.jobs == []
+    assert mock_store.uploads == []
+    assert mock_queue.jobs == []
 
 
-def test_update_missing_document_returns_404(monkeypatch) -> None:
-    service = object.__new__(RagService)
-    service._documents = {}
-    service._store = type("FakeStore", (), {"get_json": lambda self, key: None})()
-
-    monkeypatch.setattr(api_module, "get_service", lambda: service)
-    monkeypatch.setattr(api_module, "get_settings", lambda: FakeSettings())
-    client = TestClient(api_module.app)
-
-    response = client.put(
-        "/documents/missing",
+def test_update_missing_document_returns_404(fastapi_client) -> None:
+    missing_id = "00000000-0000-0000-0000-000000000000"
+    response = fastapi_client.put(
+        f"/documents/{missing_id}",
         files={"file": ("source.pdf", b"%PDF-1.4", "application/pdf")},
     )
 
     assert response.status_code == 404
 
 
-def test_delete_missing_document_returns_404(monkeypatch) -> None:
-    service = object.__new__(RagService)
-    service._documents = {}
-    service._store = type("FakeStore", (), {"get_json": lambda self, key: None})()
-
-    monkeypatch.setattr(api_module, "get_service", lambda: service)
-    client = TestClient(api_module.app)
-
-    response = client.delete("/documents/missing")
+def test_delete_missing_document_returns_404(fastapi_client) -> None:
+    missing_id = "00000000-0000-0000-0000-000000000000"
+    response = fastapi_client.delete(f"/documents/{missing_id}")
 
     assert response.status_code == 404

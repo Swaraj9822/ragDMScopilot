@@ -1,0 +1,31 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      worker:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["python", "-m", "rag_system.worker"]
+    env_file:
+      - .env
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/worker-healthy"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

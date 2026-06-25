@@ -16,7 +16,6 @@ class FakeStore:
 
 def test_document_record_is_persisted_and_reloaded_from_store() -> None:
     service = object.__new__(RagService)
-    service._documents = {}
     service._store = FakeStore()
 
     record = DocumentRecord(
@@ -28,7 +27,6 @@ def test_document_record_is_persisted_and_reloaded_from_store() -> None:
     )
 
     service._save_document_record(record)
-    service._documents = {}
 
     reloaded = service.get_document("doc-123")
 

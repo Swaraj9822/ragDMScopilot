@@ -85,7 +85,9 @@ class TestSpreadsheetParser:
 class TestHtmlParser:
     @pytest.mark.asyncio
     async def test_html_parsing(self) -> None:
-        html = b"<html><head><title>Test</title></head><body><h1>Hello</h1><p>World</p></body></html>"
+        html = (
+            b"<html><head><title>Test</title></head><body><h1>Hello</h1><p>World</p></body></html>"
+        )
         parser = HtmlParser()
         result = await parser.parse("doc1", "v1", "page.html", html)
         assert "Hello" in result.markdown
@@ -121,10 +123,26 @@ class TestTextParser:
 def test_supported_extensions_completeness() -> None:
     """All advertised formats should be in the set."""
     expected = {
-        ".pdf", ".docx", ".doc", ".pptx", ".ppt",
-        ".xlsx", ".csv",
-        ".html", ".htm",
-        ".txt", ".md", ".markdown", ".rst",
-        ".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp", ".gif",
+        ".pdf",
+        ".docx",
+        ".doc",
+        ".pptx",
+        ".ppt",
+        ".xlsx",
+        ".csv",
+        ".html",
+        ".htm",
+        ".txt",
+        ".md",
+        ".markdown",
+        ".rst",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".tiff",
+        ".tif",
+        ".bmp",
+        ".webp",
+        ".gif",
     }
     assert expected.issubset(SUPPORTED_EXTENSIONS)

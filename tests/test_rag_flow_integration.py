@@ -15,20 +15,34 @@ from rag_system.models import (
 )
 from rag_system.queue import ReceivedIngestionJob
 from rag_system.service import RagService
-from rag_system.storage import chunks_key, document_record_key, parsed_key, raw_pdf_key
+from rag_system.storage import chunks_key, document_record_key, parsed_key
 from rag_system.worker import IngestionWorker
 
 
 class FakeSettings:
     max_upload_bytes = 1024
     sparse_enabled = False
-    rerank_enabled = False
-    rerank_top_k = 12
     retrieval_dense_top_k = 10
     low_top_score_threshold = None
     bedrock_embedding_model_id = "fake-embedder"
     s3_bucket = "bucket"
     pinecone_index_name = "fake-index"
+    # Request-level timeouts (seconds)
+    request_timeout_query_s = 60
+    request_timeout_copilot_s = 90
+    request_timeout_ask_s = 120
+    bedrock_read_timeout_s = 45
+    # New hardening fields
+    ingestion_max_receive_count = 5
+    generation_max_context_chars = 24000
+    generation_max_tokens = 4096
+    pinecone_upsert_batch_size = 100
+    embedding_max_workers = 10
+    circuit_failure_threshold = 5
+    circuit_recovery_timeout_s = 30
+    readiness_probe_timeout_s = 3
+    copilot_sql_max_attempts = 3
+    copilot_schema_catalog_s3_uri = None
 
 
 class IntegrationStore:
@@ -36,13 +50,14 @@ class IntegrationStore:
         self.objects: dict[str, object] = {}
         self.bytes: dict[str, bytes] = {}
 
-    def put_pdf(self, document_id: str, version: str, content: bytes) -> str:
-        key = raw_pdf_key(document_id, version)
-        self.bytes[key] = content
-        return f"s3://bucket/{key}"
+    def put_raw(self, document_id: str, version: str, filename: str, content: bytes) -> str:
+        key = f"s3://bucket/raw/{document_id}/{version}/{filename}"
+        self.objects[key] = content
+        return key
 
-    def get_pdf(self, document_id: str, version: str) -> bytes:
-        return self.bytes[raw_pdf_key(document_id, version)]
+    def get_raw(self, document_id: str, version: str, filename: str) -> bytes:
+        key = f"s3://bucket/raw/{document_id}/{version}/{filename}"
+        return self.objects[key]
 
     def put_json(self, key: str, payload: object) -> str:
         self.objects[key] = payload
@@ -138,9 +153,7 @@ class IntegrationIndex:
 
     def delete_document(self, document_id: str) -> None:
         self.deleted_document_ids.append(document_id)
-        self.upserted = [
-            item for item in self.upserted if item.chunk.document_id != document_id
-        ]
+        self.upserted = [item for item in self.upserted if item.chunk.document_id != document_id]
 
     def search(
         self,
@@ -293,18 +306,18 @@ def test_update_document_keeps_id_queues_new_version_and_replaces_vectors(monkey
     assert service.get_document(document_id).status == DocumentStatus.indexed
 
 
-def _service(store: IntegrationStore, queue: IntegrationQueue, index: IntegrationIndex) -> RagService:
+def _service(
+    store: IntegrationStore, queue: IntegrationQueue, index: IntegrationIndex
+) -> RagService:
     service = object.__new__(RagService)
     service._settings = SimpleNamespace(**FakeSettings.__dict__)
     service._store = store
     service._queue = queue
-    service._documents = {}
     service._parser = IntegrationParser()
     service._chunker = IntegrationChunker()
     service._embedder = IntegrationEmbedder()
     service._sparse_encoder = None
     service._index = index
-    service._reranker = None
     service._generator = IntegrationGenerator()
     return service
 

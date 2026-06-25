@@ -2,6 +2,7 @@ import hashlib
 import uuid
 from collections import Counter
 from typing import Any
+import threading
 
 from rag_system.chunking import SemanticChunker
 from rag_system.config import Settings
@@ -17,7 +18,6 @@ from rag_system.models import (
 from rag_system.observability import get_logger, get_trace_id, metrics, timed
 from rag_system.parsing import DocumentParserRouter
 from rag_system.queue import IngestionJob, SqsIngestionQueue
-from rag_system.rerank import BedrockCohereReranker
 from rag_system.retrieval import PineconeHybridIndex
 from rag_system.sparse import BM25SparseEncoder
 from rag_system.storage import (
@@ -41,13 +41,9 @@ class RagService:
         self._embedder: BedrockTitanEmbedder | None = None
         self._sparse_encoder: BM25SparseEncoder | None = None
         self._index: PineconeHybridIndex | None = None
-        self._reranker: BedrockCohereReranker | None = None
         self._generator: BedrockNemotronGenerator | None = None
-        self._documents: dict[str, DocumentRecord] = {}
-        logger.info(
-            "RagService initialised (rerank=%s)",
-            "enabled" if settings.rerank_enabled else "disabled",
-        )
+        self._init_lock = threading.Lock()
+        logger.info("RagService initialised")
 
     @property
     def queue(self) -> SqsIngestionQueue:
@@ -56,62 +52,68 @@ class RagService:
     @property
     def parser(self) -> DocumentParserRouter:
         if self._parser is None:
-            self._parser = DocumentParserRouter(self._settings)
+            with self._init_lock:
+                if self._parser is None:
+                    self._parser = DocumentParserRouter(self._settings)
         return self._parser
 
     @property
     def chunker(self) -> SemanticChunker:
         if self._chunker is None:
-            self._chunker = SemanticChunker(self._settings)
+            with self._init_lock:
+                if self._chunker is None:
+                    self._chunker = SemanticChunker(self._settings)
         return self._chunker
 
     @property
     def embedder(self) -> BedrockTitanEmbedder:
         if self._embedder is None:
-            self._embedder = BedrockTitanEmbedder(self._settings)
+            with self._init_lock:
+                if self._embedder is None:
+                    self._embedder = BedrockTitanEmbedder(self._settings)
         return self._embedder
 
     @property
     def sparse_encoder(self) -> BM25SparseEncoder:
         if self._sparse_encoder is None:
-            self._sparse_encoder = BM25SparseEncoder()
+            with self._init_lock:
+                if self._sparse_encoder is None:
+                    self._sparse_encoder = BM25SparseEncoder()
         return self._sparse_encoder
 
     @property
     def index(self) -> PineconeHybridIndex:
         if self._index is None:
-            self._index = PineconeHybridIndex(self._settings)
+            with self._init_lock:
+                if self._index is None:
+                    self._index = PineconeHybridIndex(self._settings)
         return self._index
-
-    @property
-    def reranker(self) -> BedrockCohereReranker | None:
-        if not self._settings.rerank_enabled:
-            return None
-        if self._reranker is None:
-            self._reranker = BedrockCohereReranker(self._settings)
-        return self._reranker
 
     @property
     def generator(self) -> BedrockNemotronGenerator:
         if self._generator is None:
-            self._generator = BedrockNemotronGenerator(self._settings)
+            with self._init_lock:
+                if self._generator is None:
+                    self._generator = BedrockNemotronGenerator(self._settings)
         return self._generator
 
-    async def queue_document(self, filename: str, content: bytes) -> DocumentRecord:
-        return await self._queue_document(str(uuid.uuid4()), filename, content)
+    def queue_document(self, filename: str, content: bytes) -> DocumentRecord:
+        return self._queue_document(str(uuid.uuid4()), filename, content)
 
     # Backward-compatible alias
-    async def queue_pdf(self, filename: str, content: bytes) -> DocumentRecord:
-        return await self.queue_document(filename, content)
+    def queue_pdf(self, filename: str, content: bytes) -> DocumentRecord:
+        return self.queue_document(filename, content)
 
-    async def update_document(self, document_id: str, filename: str, content: bytes) -> DocumentRecord | None:
+    def update_document(
+        self, document_id: str, filename: str, content: bytes
+    ) -> DocumentRecord | None:
         current = self.get_document(document_id)
         if current is None or current.status == DocumentStatus.deleted:
             return None
 
         with timed(logger, "Pinecone document delete before update", document_id=document_id):
             self.index.delete_document(document_id)
-        return await self._queue_document(document_id, filename, content)
+        return self._queue_document(document_id, filename, content)
 
     def delete_document(self, document_id: str) -> DocumentRecord | None:
         record = self.get_document(document_id)
@@ -125,10 +127,12 @@ class RagService:
         deleted = record.model_copy(update={"status": DocumentStatus.deleted, "error": None})
         self._save_document_record(deleted)
         metrics.increment("rag_documents_deleted_total")
-        logger.info("Document deleted", extra={"document_id": document_id, "version": record.version})
+        logger.info(
+            "Document deleted", extra={"document_id": document_id, "version": record.version}
+        )
         return deleted
 
-    async def _queue_document(self, document_id: str, filename: str, content: bytes) -> DocumentRecord:
+    def _queue_document(self, document_id: str, filename: str, content: bytes) -> DocumentRecord:
         version = content_hash(content)
         log_extra: dict[str, Any] = {
             "document_id": document_id,
@@ -174,12 +178,12 @@ class RagService:
         logger.info("Document ingestion queued for %s", filename, extra=log_extra)
         return record
 
-    async def ingest_document(self, filename: str, content: bytes) -> DocumentRecord:
-        return await self.queue_document(filename, content)
+    def ingest_document(self, filename: str, content: bytes) -> DocumentRecord:
+        return self.queue_document(filename, content)
 
     # Backward-compatible alias
-    async def ingest_pdf(self, filename: str, content: bytes) -> DocumentRecord:
-        return await self.queue_document(filename, content)
+    def ingest_pdf(self, filename: str, content: bytes) -> DocumentRecord:
+        return self.queue_document(filename, content)
 
     async def process_document_job(self, job: IngestionJob) -> DocumentRecord:
         record = self.get_document(job.document_id)
@@ -261,11 +265,12 @@ class RagService:
                     "version": version,
                     "chunk_count": len(chunks),
                     "embedding_model": self._settings.bedrock_embedding_model_id,
-                    "sparse_model": "bm25-msmarco-default" if self._settings.sparse_enabled else None,
+                    "sparse_model": "bm25-msmarco-default"
+                    if self._settings.sparse_enabled
+                    else None,
                     "pinecone_index": self._settings.pinecone_index_name,
                     "chunks_uri": (
-                        f"s3://{self._settings.s3_bucket}/"
-                        f"{chunks_key(document_id, version)}"
+                        f"s3://{self._settings.s3_bucket}/{chunks_key(document_id, version)}"
                     ),
                 },
             )
@@ -282,22 +287,16 @@ class RagService:
                 extra=log_extra,
                 exc_info=True,
             )
-            failed = record.model_copy(
-                update={"status": DocumentStatus.failed, "error": str(exc)}
-            )
+            failed = record.model_copy(update={"status": DocumentStatus.failed, "error": str(exc)})
             self._save_document_record(failed)
             raise
 
     def get_document(self, document_id: str) -> DocumentRecord | None:
-        if record := self._documents.get(document_id):
-            return record
-
         payload = self._store.get_json(document_record_key(document_id))
         if payload is None:
             return None
 
         record = DocumentRecord.model_validate(payload)
-        self._documents[document_id] = record
         logger.info(
             "Loaded document record from S3",
             extra={"document_id": document_id, "version": record.version},
@@ -305,7 +304,6 @@ class RagService:
         return record
 
     def _save_document_record(self, record: DocumentRecord) -> None:
-        self._documents[record.id] = record
         key = document_record_key(record.id)
         self._store.put_json(key, record.model_dump(mode="json"))
         logger.info(
@@ -317,6 +315,16 @@ class RagService:
                 "s3_key": key,
             },
         )
+
+    def mark_failed(self, document_id: str, error: str) -> None:
+        """Mark a document as failed, persisting the error. Used by the worker to abandon
+        messages that have exceeded the retry limit."""
+        record = self.get_document(document_id)
+        if record is None:
+            logger.warning("mark_failed: document not found %s", document_id)
+            return
+        failed = record.model_copy(update={"status": DocumentStatus.failed, "error": error})
+        self._save_document_record(failed)
 
     def query(self, request: QueryRequest) -> QueryResponse:
         trace_id = get_trace_id() or str(uuid.uuid4())
@@ -363,24 +371,13 @@ class RagService:
                 top_k=self._settings.retrieval_dense_top_k,
                 document_ids=request.document_ids,
             )
-        logger.info(
-            "Retrieved %d hits", len(hits), extra={**log_extra, "hit_count": len(hits)}
-        )
+        logger.info("Retrieved %d hits", len(hits), extra={**log_extra, "hit_count": len(hits)})
         self._observe_retrieval_quality(hits, retrieval_mode, log_extra)
 
-        # Reranking is optional — controlled by RAG_RERANK_ENABLED
-        reranker = self.reranker
-        if reranker:
-            with timed(logger, "reranking", **log_extra):
-                top_hits = reranker.rerank(request.question, hits)
-            logger.info("Reranked to %d hits", len(top_hits), extra=log_extra)
-        else:
-            top_hits = hits[: self._settings.rerank_top_k]
-
         with timed(logger, "answer generation", **log_extra):
-            response = self.generator.answer(request.question, top_hits, trace_id)
+            response = self.generator.answer(request.question, hits, trace_id)
 
-        self._observe_answer_quality(response, top_hits, retrieval_mode, log_extra)
+        self._observe_answer_quality(response, hits, retrieval_mode, log_extra)
         logger.info("Query complete (trace=%s)", trace_id, extra=log_extra)
         return response
 
@@ -425,8 +422,7 @@ class RagService:
             {"mode": retrieval_mode},
         )
         logger.info(
-            "Retrieval quality: top=%.4f min=%.4f avg=%.4f unique_docs=%d "
-            "dominant_doc_ratio=%.2f",
+            "Retrieval quality: top=%.4f min=%.4f avg=%.4f unique_docs=%d dominant_doc_ratio=%.2f",
             top_score,
             min_score,
             avg_score,
