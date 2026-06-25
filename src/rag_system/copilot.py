@@ -13,8 +13,9 @@ from sqlglot.errors import ParseError
 from pydantic import BaseModel, Field
 
 from rag_system.config import Settings
+from rag_system.llm_provider import GenerationProvider, GenerationRequest
 from rag_system.models import CopilotDataSource, CopilotQueryRequest, CopilotQueryResponse
-from rag_system.observability import get_logger, get_trace_id, metrics, retry_on_transient, timed
+from rag_system.observability import get_logger, get_trace_id, metrics, timed
 
 logger = get_logger(__name__)
 
@@ -356,25 +357,20 @@ class PostgresCopilotExecutor:
 
 
 class BedrockDatabaseCopilot:
-    def __init__(self, settings: Settings):
-        self._client = settings.boto3_session().client(
-            "bedrock-runtime",
-            config=settings.bedrock_botocore_config(),
-        )
-        self._model_id = settings.bedrock_model_id
+    def __init__(self, settings: Settings, provider: GenerationProvider):
+        self._provider = provider
+        self._model_id = settings.bedrock_model_id  # for logging only
 
-    @retry_on_transient()
     def _call_bedrock(self, prompt: str, system_prompt: str | None = None) -> str:
-        messages = [{"role": "user", "content": [{"text": prompt}]}]
-        kwargs = {
-            "modelId": self._model_id,
-            "messages": messages,
-            "inferenceConfig": {"temperature": 0.0, "maxTokens": 2048},
-        }
-        if system_prompt:
-            kwargs["system"] = [{"text": system_prompt}]
-        response = self._client.converse(**kwargs)
-        return response["output"]["message"]["content"][0]["text"]
+        result = self._provider.generate(
+            GenerationRequest(
+                user_prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.0,
+                max_output_tokens=2048,
+            )
+        )
+        return result.text
 
     def check_intent(self, question: str) -> None:
         system_prompt = (
@@ -433,8 +429,9 @@ class BedrockDatabaseCopilot:
 
 
 class DatabaseCopilotService:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, provider: GenerationProvider | None = None):
         self._settings = settings
+        self._provider = provider
         self._catalog: CopilotSchemaCatalog | None = None
         self._catalog_mtime: float | None = None
         self._guard: CopilotSqlGuard | None = None
@@ -512,7 +509,7 @@ class DatabaseCopilotService:
     @property
     def generator(self) -> BedrockDatabaseCopilot:
         if self._generator is None:
-            self._generator = BedrockDatabaseCopilot(self._settings)
+            self._generator = BedrockDatabaseCopilot(self._settings, self._provider)
         return self._generator
 
     def query(self, request: CopilotQueryRequest) -> CopilotQueryResponse:

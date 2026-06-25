@@ -22,6 +22,7 @@ from rag_system.worker import IngestionWorker
 class FakeSettings:
     max_upload_bytes = 1024
     sparse_enabled = False
+    reranker_enabled = False
     retrieval_dense_top_k = 10
     low_top_score_threshold = None
     bedrock_embedding_model_id = "fake-embedder"

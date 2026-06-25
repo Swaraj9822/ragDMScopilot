@@ -7,7 +7,8 @@ import threading
 from rag_system.chunking import SemanticChunker
 from rag_system.config import Settings
 from rag_system.embedding import BedrockTitanEmbedder
-from rag_system.generation import BedrockNemotronGenerator
+from rag_system.generation import AnswerGenerator
+from rag_system.llm_provider import GenerationProvider, get_generation_provider
 from rag_system.models import (
     DocumentRecord,
     DocumentStatus,
@@ -15,7 +16,14 @@ from rag_system.models import (
     QueryResponse,
     RetrievalHit,
 )
-from rag_system.observability import get_logger, get_trace_id, metrics, timed
+from rag_system.observability import (
+    get_circuit_breaker,
+    get_logger,
+    get_trace_id,
+    metrics,
+    timed,
+)
+from rag_system.reranker import LLMReranker
 from rag_system.parsing import DocumentParserRouter
 from rag_system.queue import IngestionJob, SqsIngestionQueue
 from rag_system.retrieval import PineconeHybridIndex
@@ -41,7 +49,9 @@ class RagService:
         self._embedder: BedrockTitanEmbedder | None = None
         self._sparse_encoder: BM25SparseEncoder | None = None
         self._index: PineconeHybridIndex | None = None
-        self._generator: BedrockNemotronGenerator | None = None
+        self._generator: AnswerGenerator | None = None
+        self._provider: GenerationProvider | None = None
+        self._reranker: LLMReranker | None = None
         self._init_lock = threading.Lock()
         logger.info("RagService initialised")
 
@@ -90,12 +100,22 @@ class RagService:
         return self._index
 
     @property
-    def generator(self) -> BedrockNemotronGenerator:
+    def generator(self) -> AnswerGenerator:
         if self._generator is None:
             with self._init_lock:
                 if self._generator is None:
-                    self._generator = BedrockNemotronGenerator(self._settings)
+                    if self._provider is None:
+                        self._provider = get_generation_provider(self._settings)
+                    self._generator = AnswerGenerator(self._settings, self._provider)
         return self._generator
+
+    @property
+    def reranker(self) -> LLMReranker:
+        if self._reranker is None:
+            with self._init_lock:
+                if self._reranker is None:
+                    self._reranker = LLMReranker(self._settings)
+        return self._reranker
 
     def queue_document(self, filename: str, content: bytes) -> DocumentRecord:
         return self._queue_document(str(uuid.uuid4()), filename, content)
@@ -373,6 +393,47 @@ class RagService:
             )
         logger.info("Retrieved %d hits", len(hits), extra={**log_extra, "hit_count": len(hits)})
         self._observe_retrieval_quality(hits, retrieval_mode, log_extra)
+
+        # Reranker stage (optional, disabled by default)
+        if self._settings.reranker_enabled:
+            try:
+                cb = get_circuit_breaker("reranker")
+                if not cb.allow_request():
+                    logger.warning(
+                        "Reranker circuit breaker OPEN, using unreranked hits (trace=%s)",
+                        trace_id,
+                        extra=log_extra,
+                    )
+                    metrics.increment("rag_reranker_fallback_total", {"reason": "circuit_open"})
+                else:
+                    ranked_hits = self.reranker.rerank(request.question, hits)
+                    # Convert RankedHit back to RetrievalHit for AnswerGenerator
+                    hits = [
+                        RetrievalHit(chunk=rh.chunk, score=rh.score, source=rh.source)
+                        for rh in ranked_hits
+                    ]
+                    logger.info(
+                        "Reranker applied: %d → %d hits (trace=%s)",
+                        len(hits),
+                        len(ranked_hits),
+                        trace_id,
+                        extra={**log_extra, "reranked": True},
+                    )
+            except TimeoutError:
+                logger.warning(
+                    "Reranker timeout, falling back to unreranked hits (trace=%s)",
+                    trace_id,
+                    extra=log_extra,
+                )
+                metrics.increment("rag_reranker_fallback_total", {"reason": "timeout"})
+            except Exception:
+                logger.warning(
+                    "Reranker error, falling back to unreranked hits (trace=%s)",
+                    trace_id,
+                    exc_info=True,
+                    extra=log_extra,
+                )
+                metrics.increment("rag_reranker_fallback_total", {"reason": "error"})
 
         with timed(logger, "answer generation", **log_extra):
             response = self.generator.answer(request.question, hits, trace_id)

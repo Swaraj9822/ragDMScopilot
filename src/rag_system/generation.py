@@ -1,56 +1,19 @@
 from textwrap import dedent
-from typing import Any
 
 from rag_system.config import Settings
+from rag_system.llm_provider import GenerationProvider, GenerationRequest
 from rag_system.models import Citation, QueryResponse, RetrievalHit
-from rag_system.observability import get_logger, metrics, retry_on_transient
+from rag_system.observability import get_logger, metrics
 
 logger = get_logger(__name__)
 
 
-class BedrockNemotronGenerator:
-    def __init__(self, settings: Settings):
-        self._client = settings.boto3_session().client(
-            "bedrock-runtime",
-            config=settings.bedrock_botocore_config(),
-        )
-        self._model_id = settings.bedrock_model_id
+class AnswerGenerator:
+    def __init__(self, settings: Settings, provider: GenerationProvider):
+        self._provider = provider
+        self._model_id = settings.bedrock_model_id  # for metrics only
         self._max_context_chars = settings.generation_max_context_chars
         self._max_tokens = settings.generation_max_tokens
-        self._circuit_failure_threshold = settings.circuit_failure_threshold
-        self._circuit_recovery_timeout_s = settings.circuit_recovery_timeout_s
-
-    @retry_on_transient()
-    def _call_bedrock_inner(self, prompt: str) -> tuple[str, dict[str, Any]]:
-        """Call Bedrock converse API with retry on transient failures."""
-        response = self._client.converse(
-            modelId=self._model_id,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"temperature": 0.1, "maxTokens": self._max_tokens},
-        )
-        return response["output"]["message"]["content"][0]["text"], response.get("usage", {})
-
-    def _call_bedrock(self, prompt: str) -> tuple[str, dict[str, Any]]:
-        """Circuit-protected wrapper around the retrying inner call."""
-        from rag_system.observability import get_circuit_breaker
-
-        cb = get_circuit_breaker(
-            "bedrock", self._circuit_failure_threshold, self._circuit_recovery_timeout_s
-        )
-        if not cb.allow_request():
-            from rag_system.observability import CircuitOpenError
-            import time
-
-            opened_ago = time.perf_counter() - cb._opened_at if cb._opened_at else 0.0
-            raise CircuitOpenError("bedrock", opened_ago)
-        try:
-            result = self._call_bedrock_inner(prompt)
-        except Exception:
-            cb.record_failure()
-            raise
-        else:
-            cb.record_success()
-            return result
 
     def answer(self, question: str, hits: list[RetrievalHit], trace_id: str) -> QueryResponse:
         log_extra = {"trace_id": trace_id, "hit_count": len(hits), "model_id": self._model_id}
@@ -96,7 +59,7 @@ class BedrockNemotronGenerator:
         context_chars = len(context)
 
         logger.info(
-            "Calling Bedrock %s (prompt=%d chars, context=%d chars, %d citations)",
+            "Calling generation provider (model=%s, prompt=%d chars, context=%d chars, %d citations)",
             self._model_id,
             prompt_chars,
             context_chars,
@@ -114,7 +77,14 @@ class BedrockNemotronGenerator:
             "rag_generation_citation_count", len(citations), {"model_id": self._model_id}
         )
 
-        answer_text, usage = self._call_bedrock(prompt)
+        result = self._provider.generate(
+            GenerationRequest(
+                user_prompt=prompt, temperature=0.1, max_output_tokens=self._max_tokens
+            )
+        )
+        answer_text = result.text
+        usage = result.usage
+
         answer_chars = len(answer_text)
         for token_name, token_count in usage.items():
             if isinstance(token_count, (int, float)):
@@ -124,7 +94,7 @@ class BedrockNemotronGenerator:
                     {"model_id": self._model_id, "token_type": token_name},
                 )
         logger.info(
-            "Bedrock returned %d-char answer (trace=%s, usage=%s)",
+            "Generation returned %d-char answer (trace=%s, usage=%s)",
             answer_chars,
             trace_id,
             usage,
@@ -138,6 +108,10 @@ class BedrockNemotronGenerator:
             evidence_status=evidence_status,
             trace_id=trace_id,
         )
+
+
+# Backward-compatible alias
+BedrockNemotronGenerator = AnswerGenerator
 
 
 def build_grounded_prompt(question: str, context: str) -> str:

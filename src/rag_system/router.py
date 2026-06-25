@@ -12,13 +12,14 @@ from pydantic import BaseModel, Field
 
 from rag_system.config import Settings
 from rag_system.copilot import DatabaseCopilotService
+from rag_system.llm_provider import GenerationProvider, GenerationRequest
 from rag_system.models import (
     CopilotQueryRequest,
     QueryRequest,
     UnifiedQueryRequest,
     UnifiedQueryResponse,
 )
-from rag_system.observability import get_logger, get_trace_id, metrics, retry_on_transient, timed
+from rag_system.observability import get_logger, get_trace_id, metrics, timed
 
 logger = get_logger(__name__)
 
@@ -46,16 +47,12 @@ class RoutingDecision(BaseModel):
 
 
 class BedrockQueryClassifier:
-    """Uses Bedrock to classify a user query into a routing category."""
+    """Uses a GenerationProvider to classify a user query into a routing category."""
 
-    def __init__(self, settings: Settings):
-        self._client = settings.boto3_session().client(
-            "bedrock-runtime",
-            config=settings.bedrock_botocore_config(),
-        )
-        self._model_id = settings.bedrock_model_id
+    def __init__(self, settings: Settings, provider: GenerationProvider):
+        self._provider = provider
+        self._model_id = settings.bedrock_model_id  # for logging only
 
-    @retry_on_transient()
     def classify(
         self,
         question: str,
@@ -69,12 +66,10 @@ class BedrockQueryClassifier:
             extra={"query_len": len(question), "model_id": self._model_id},
         )
 
-        response = self._client.converse(
-            modelId=self._model_id,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"temperature": 0.0, "maxTokens": 256},
+        result = self._provider.generate(
+            GenerationRequest(user_prompt=prompt, temperature=0.0, max_output_tokens=256)
         )
-        raw = response["output"]["message"]["content"][0]["text"]
+        raw = result.text
         decision = _parse_routing_response(raw)
 
         logger.info(
@@ -105,14 +100,11 @@ class AgenticRouter:
         settings: Settings,
         rag_service: Any,  # RagService — typed as Any to avoid circular import
         copilot_service: DatabaseCopilotService | None,
+        provider: GenerationProvider,
     ):
         self._settings = settings
-        self._client = settings.boto3_session().client(
-            "bedrock-runtime",
-            config=settings.bedrock_botocore_config(),
-        )
-        self._model_id = settings.bedrock_model_id
-        self._classifier = BedrockQueryClassifier(settings)
+        self._provider = provider
+        self._classifier = BedrockQueryClassifier(settings, provider)
         self._rag = rag_service
         self._copilot = copilot_service
         self._copilot_available = copilot_service is not None
@@ -266,7 +258,6 @@ class AgenticRouter:
             routing_reasoning=decision.reasoning,
         )
 
-    @retry_on_transient()
     def _synthesize_hybrid(
         self,
         question: str,
@@ -275,12 +266,10 @@ class AgenticRouter:
     ) -> str:
         """Merge RAG and database answers into a single coherent response via LLM."""
         prompt = _build_synthesis_prompt(question, rag_answer, db_answer)
-        response = self._client.converse(
-            modelId=self._model_id,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"temperature": 0.1, "maxTokens": 4096},
+        result = self._provider.generate(
+            GenerationRequest(user_prompt=prompt, temperature=0.1, max_output_tokens=4096)
         )
-        answer = response["output"]["message"]["content"][0]["text"]
+        answer = result.text
         metrics.increment("rag_hybrid_synthesis_total")
         return answer
 

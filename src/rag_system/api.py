@@ -12,6 +12,7 @@ from fastapi.responses import PlainTextResponse
 
 from rag_system.config import get_settings
 from rag_system.copilot import DatabaseCopilotService, SqlValidationError
+from rag_system.llm_provider import get_generation_provider
 from rag_system.models import (
     CopilotQueryRequest,
     CopilotQueryResponse,
@@ -65,19 +66,22 @@ def get_service() -> RagService:
 
 @lru_cache
 def get_copilot_service() -> DatabaseCopilotService:
-    return DatabaseCopilotService(get_settings())
+    settings = get_settings()
+    provider = get_generation_provider(settings)
+    return DatabaseCopilotService(settings, provider)
 
 
 @lru_cache
 def get_router() -> AgenticRouter:
     settings = get_settings()
     rag = get_service()
+    provider = get_generation_provider(settings)
     try:
         copilot = get_copilot_service()
     except Exception:
         logger.warning("Copilot service unavailable — router will use RAG only")
         copilot = None
-    return AgenticRouter(settings, rag, copilot)
+    return AgenticRouter(settings, rag, copilot, provider)
 
 
 # ---------------------------------------------------------------------------
@@ -268,12 +272,10 @@ async def readiness() -> dict[str, object]:
         except Exception as e:
             return f"error: {e}"
 
-    async def probe_bedrock() -> str:
+    async def probe_generation_provider() -> str:
         try:
-            # Verify client construction works (no model call to avoid cost)
-            settings.boto3_session().client(
-                "bedrock-runtime", config=settings.bedrock_botocore_config()
-            )
+            provider = get_generation_provider(settings)
+            await run_in_threadpool(provider.readiness_check)
             return "ok"
         except Exception as e:
             return f"error: {e}"
@@ -295,7 +297,7 @@ async def readiness() -> dict[str, object]:
     probes = {
         "s3": probe_s3,
         "pinecone": probe_pinecone,
-        "bedrock": probe_bedrock,
+        "generation": probe_generation_provider,
         "postgres": probe_postgres,
     }
 

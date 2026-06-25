@@ -1,6 +1,7 @@
 import json
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 import boto3
 import boto3.session
@@ -38,6 +39,17 @@ class Settings(BaseSettings):
     )
     embedding_dimension: int = Field(default=1024, alias="EMBEDDING_DIMENSION")
     bedrock_model_id: str = Field(default="nvidia.nemotron-super-3-120b", alias="BEDROCK_MODEL_ID")
+
+    # -- Generation provider selection -----------------------------------------
+    llm_provider: Literal["bedrock", "gemini"] = Field(default="bedrock", alias="LLM_PROVIDER")
+    gemini_model_id: str = Field(default="gemini-1.5-pro", alias="GEMINI_MODEL_ID")
+    gcp_project_id: str | None = Field(default=None, alias="GCP_PROJECT_ID")
+    gcp_location: str = Field(default="us-central1", alias="GCP_LOCATION")
+    google_application_credentials: str | None = Field(
+        default=None, alias="GOOGLE_APPLICATION_CREDENTIALS", repr=False
+    )
+    llm_fallback_to_bedrock: bool = Field(default=False, alias="LLM_FALLBACK_TO_BEDROCK")
+    gemini_read_timeout_s: int = Field(default=90, alias="GEMINI_READ_TIMEOUT_S")
 
     chunk_target_tokens: int = Field(default=700, alias="RAG_CHUNK_TARGET_TOKENS")
     max_upload_bytes: int = Field(default=10 * 1024 * 1024, alias="RAG_MAX_UPLOAD_BYTES")
@@ -136,6 +148,20 @@ class Settings(BaseSettings):
         default=90,
         alias="BEDROCK_READ_TIMEOUT_S",
     )
+
+    # -- Reranker ------------------------------------------------------------------
+    reranker_enabled: bool = Field(default=False, alias="RAG_RERANKER_ENABLED")
+    reranker_model_id: str = Field(
+        default="gemini-3.5-flash", alias="RAG_RERANKER_MODEL_ID", max_length=128
+    )
+    reranker_top_k: int = Field(default=10, alias="RAG_RERANKER_TOP_K", ge=1, le=100)
+    reranker_score_threshold: float | None = Field(
+        default=None, alias="RAG_RERANKER_SCORE_THRESHOLD", ge=0.0, le=1.0
+    )
+    reranker_max_concurrent: int = Field(
+        default=5, alias="RAG_RERANKER_MAX_CONCURRENT", ge=1, le=50
+    )
+    reranker_timeout_s: int = Field(default=30, alias="RAG_RERANKER_TIMEOUT_S", ge=1, le=300)
 
     def model_post_init(self, __context) -> None:
         if self.secrets_manager_secret_id:
