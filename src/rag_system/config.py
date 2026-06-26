@@ -3,6 +3,7 @@ from pathlib import Path
 
 import boto3
 import boto3.session
+from botocore.config import Config as BotoConfig
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -34,9 +35,25 @@ class Settings(BaseSettings):
     bedrock_rerank_model_id: str = Field(
         default="cohere.rerank-v3-5:0", alias="BEDROCK_RERANK_MODEL_ID"
     )
-    bedrock_model_id: str = Field(
-        default="nvidia.nemotron-super-3-120b", alias="BEDROCK_MODEL_ID"
+
+    # --- Text-generation LLM (Google Gemini on Vertex AI) ---
+    gemini_model_id: str = Field(default="gemini-3.5-flash", alias="GEMINI_MODEL_ID")
+    gcp_project_id: str | None = Field(default=None, alias="GCP_PROJECT_ID")
+    gcp_location: str = Field(default="us-central1", alias="GCP_LOCATION")
+    google_application_credentials: str | None = Field(
+        default=None, alias="GOOGLE_APPLICATION_CREDENTIALS"
     )
+    gemini_read_timeout_s: int = Field(default=90, alias="GEMINI_READ_TIMEOUT_S")
+    # Thinking-token budget for Gemini reasoning models. None = SDK default
+    # (dynamic). 0 disables thinking on models that support it (e.g. Flash).
+    gemini_thinking_budget: int | None = Field(
+        default=None, alias="GEMINI_THINKING_BUDGET"
+    )
+
+    @property
+    def active_llm_model_id(self) -> str:
+        """Model id of the text-generation provider (Gemini)."""
+        return self.gemini_model_id
 
     chunk_target_tokens: int = Field(default=700, alias="RAG_CHUNK_TARGET_TOKENS")
     max_upload_bytes: int = Field(default=10 * 1024 * 1024, alias="RAG_MAX_UPLOAD_BYTES")
@@ -63,6 +80,13 @@ class Settings(BaseSettings):
         alias="COPILOT_STATEMENT_TIMEOUT_MS",
     )
 
+    # AWS client tuning. Bedrock/S3 latency from some environments is erratic;
+    # explicit timeouts + adaptive retries fail fast and back off on throttling
+    # instead of hanging on a single slow call.
+    aws_connect_timeout_s: int = Field(default=5, alias="AWS_CONNECT_TIMEOUT_S")
+    aws_read_timeout_s: int = Field(default=30, alias="AWS_READ_TIMEOUT_S")
+    aws_max_attempts: int = Field(default=4, alias="AWS_MAX_ATTEMPTS")
+
     def boto3_session(self) -> boto3.session.Session:
         """Return a boto3 Session pre-loaded with credentials from .env.
 
@@ -73,6 +97,20 @@ class Settings(BaseSettings):
             aws_access_key_id=self.aws_access_key_id or None,
             aws_secret_access_key=self.aws_secret_access_key or None,
             region_name=self.aws_region,
+        )
+
+    def boto3_client_config(self) -> BotoConfig:
+        """botocore Config with bounded timeouts and adaptive retries."""
+        return BotoConfig(
+            connect_timeout=self.aws_connect_timeout_s,
+            read_timeout=self.aws_read_timeout_s,
+            retries={"max_attempts": self.aws_max_attempts, "mode": "adaptive"},
+        )
+
+    def bedrock_runtime_client(self):
+        """bedrock-runtime client with tuned timeouts/retries."""
+        return self.boto3_session().client(
+            "bedrock-runtime", config=self.boto3_client_config()
         )
 
 

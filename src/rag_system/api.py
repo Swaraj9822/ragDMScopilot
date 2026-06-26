@@ -12,8 +12,11 @@ from rag_system.models import (
     CopilotQueryRequest,
     CopilotQueryResponse,
     DocumentRecord,
+    QueryFeedbackRecord,
+    QueryFeedbackRequest,
     QueryRequest,
     QueryResponse,
+    QueryTraceRecord,
     UnifiedQueryRequest,
     UnifiedQueryResponse,
 )
@@ -152,6 +155,8 @@ def root() -> dict[str, object]:
             "update_document": "PUT /documents/{document_id}",
             "delete_document": "DELETE /documents/{document_id}",
             "query": "POST /query",
+            "get_query_trace": "GET /queries/{trace_id}",
+            "record_query_feedback": "POST /queries/{trace_id}/feedback",
             "copilot_query": "POST /copilot/query",
         },
     }
@@ -288,6 +293,25 @@ def query(request: QueryRequest) -> QueryResponse:
         extra={"query_len": len(request.question)},
     )
     return get_service().query(request)
+
+
+@app.get("/queries/{trace_id}", response_model=QueryTraceRecord)
+def get_query_trace(trace_id: str) -> QueryTraceRecord:
+    record = get_service().get_query_trace(trace_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Query trace not found.")
+    return record
+
+
+@app.post("/queries/{trace_id}/feedback", response_model=QueryFeedbackRecord)
+def record_query_feedback(
+    trace_id: str,
+    feedback: QueryFeedbackRequest,
+) -> QueryFeedbackRecord:
+    record = get_service().record_query_feedback(trace_id, feedback)
+    if not record:
+        raise HTTPException(status_code=404, detail="Query trace not found.")
+    return record
 
 
 @app.post("/copilot/query", response_model=CopilotQueryResponse)

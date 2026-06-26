@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from enum import StrEnum
 from typing import Any
 
@@ -12,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from rag_system.config import Settings
 from rag_system.copilot import DatabaseCopilotService
+from rag_system.llm import build_text_llm
 from rag_system.models import (
     CopilotQueryRequest,
     QueryRequest,
@@ -46,11 +49,11 @@ class RoutingDecision(BaseModel):
 
 
 class BedrockQueryClassifier:
-    """Uses Bedrock to classify a user query into a routing category."""
+    """Uses the configured LLM provider to classify a query into a routing category."""
 
     def __init__(self, settings: Settings):
-        self._client = settings.boto3_session().client("bedrock-runtime")
-        self._model_id = settings.bedrock_model_id
+        self._llm = build_text_llm(settings)
+        self._model_id = self._llm.model_id
 
     @retry_on_transient()
     def classify(
@@ -66,12 +69,17 @@ class BedrockQueryClassifier:
             extra={"query_len": len(question), "model_id": self._model_id},
         )
 
-        response = self._client.converse(
-            modelId=self._model_id,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"temperature": 0.0, "maxTokens": 256},
-        )
-        raw = response["output"]["message"]["content"][0]["text"]
+        # Reasoning Gemini models spend part of max_output_tokens on internal
+        # "thinking"; a tight cap (e.g. 256) can leave no room for the final
+        # JSON and yield an empty response. Give the classifier generous
+        # headroom — the visible answer is still tiny.
+        raw, usage = self._llm.generate(prompt, temperature=0.0, max_tokens=2048)
+        if not raw.strip():
+            logger.warning(
+                "Classifier returned empty text — defaulting to RAG (usage=%s)",
+                usage,
+                extra={"model_id": self._model_id},
+            )
         decision = _parse_routing_response(raw)
 
         logger.info(
@@ -104,8 +112,8 @@ class AgenticRouter:
         copilot_service: DatabaseCopilotService | None,
     ):
         self._settings = settings
-        self._client = settings.boto3_session().client("bedrock-runtime")
-        self._model_id = settings.bedrock_model_id
+        self._llm = build_text_llm(settings)
+        self._model_id = self._llm.model_id
         self._classifier = BedrockQueryClassifier(settings)
         self._rag = rag_service
         self._copilot = copilot_service
@@ -177,6 +185,8 @@ class AgenticRouter:
             evidence_status=rag_response.evidence_status,
             trace_id=rag_response.trace_id,
             citations=rag_response.citations,
+            confidence=rag_response.confidence,
+            insufficient_evidence_reason=rag_response.insufficient_evidence_reason,
             routing_reasoning=decision.reasoning,
         )
 
@@ -221,11 +231,20 @@ class AgenticRouter:
             include_sql=request.include_sql,
         )
 
-        with timed(logger, "RAG query (hybrid)", **log_extra):
-            rag_response = self._rag.query(rag_request)
-
-        with timed(logger, "copilot query (hybrid)", **log_extra):
-            copilot_response = self._copilot.query(copilot_request)
+        # RAG and the database copilot are independent lookups — run them
+        # concurrently so the shorter branch is hidden under the longer one.
+        # copy_context() propagates the request trace-id into the worker threads
+        # so their logs stay correlated.
+        with timed(logger, "hybrid parallel lookup (RAG + database)", **log_extra):
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hybrid") as pool:
+                rag_ctx = contextvars.copy_context()
+                copilot_ctx = contextvars.copy_context()
+                rag_future = pool.submit(rag_ctx.run, self._rag.query, rag_request)
+                copilot_future = pool.submit(
+                    copilot_ctx.run, self._copilot.query, copilot_request
+                )
+                rag_response = rag_future.result()
+                copilot_response = copilot_future.result()
 
         # Synthesize a unified answer from both sources
         with timed(logger, "hybrid answer synthesis", **log_extra):
@@ -251,6 +270,8 @@ class AgenticRouter:
             evidence_status=evidence_status,
             trace_id=trace_id,
             citations=rag_response.citations,
+            confidence=rag_response.confidence,
+            insufficient_evidence_reason=rag_response.insufficient_evidence_reason,
             sql=copilot_response.sql,
             rows=copilot_response.rows,
             data_sources=copilot_response.data_sources,
@@ -266,12 +287,7 @@ class AgenticRouter:
     ) -> str:
         """Merge RAG and database answers into a single coherent response via LLM."""
         prompt = _build_synthesis_prompt(question, rag_answer, db_answer)
-        response = self._client.converse(
-            modelId=self._model_id,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"temperature": 0.1, "maxTokens": 4096},
-        )
-        answer = response["output"]["message"]["content"][0]["text"]
+        answer, _usage = self._llm.generate(prompt, temperature=0.1, max_tokens=4096)
         metrics.increment("rag_hybrid_synthesis_total")
         return answer
 
@@ -345,6 +361,12 @@ def _parse_routing_response(raw: str) -> RoutingDecision:
     fenced = re.search(r"```(?:json)?\s*(.*?)```", stripped, re.IGNORECASE | re.DOTALL)
     if fenced:
         stripped = fenced.group(1).strip()
+    else:
+        # Fall back to the first balanced-looking {...} object, in case the
+        # model wraps the JSON in prose or reasoning text.
+        obj = re.search(r"\{.*\}", stripped, re.DOTALL)
+        if obj:
+            stripped = obj.group(0).strip()
 
     try:
         payload = json.loads(stripped)

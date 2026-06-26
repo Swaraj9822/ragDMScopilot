@@ -1,17 +1,25 @@
+import contextvars
 import hashlib
+import threading
+import time
 import uuid
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any
 
 from rag_system.chunking import SemanticChunker
 from rag_system.config import Settings
 from rag_system.embedding import BedrockTitanEmbedder
-from rag_system.generation import BedrockNemotronGenerator
+from rag_system.generation import GroundedAnswerGenerator
 from rag_system.models import (
     DocumentRecord,
     DocumentStatus,
+    QueryFeedbackRecord,
+    QueryFeedbackRequest,
     QueryRequest,
     QueryResponse,
+    QueryTraceHit,
+    QueryTraceRecord,
     RetrievalHit,
 )
 from rag_system.observability import get_logger, get_trace_id, metrics, timed
@@ -26,6 +34,8 @@ from rag_system.storage import (
     document_record_key,
     embedding_manifest_key,
     parsed_key,
+    query_feedback_key,
+    query_trace_key,
 )
 
 logger = get_logger(__name__)
@@ -42,7 +52,7 @@ class RagService:
         self._sparse_encoder: BM25SparseEncoder | None = None
         self._index: PineconeHybridIndex | None = None
         self._reranker: BedrockCohereReranker | None = None
-        self._generator: BedrockNemotronGenerator | None = None
+        self._generator: GroundedAnswerGenerator | None = None
         self._documents: dict[str, DocumentRecord] = {}
         logger.info(
             "RagService initialised (rerank=%s)",
@@ -92,9 +102,9 @@ class RagService:
         return self._reranker
 
     @property
-    def generator(self) -> BedrockNemotronGenerator:
+    def generator(self) -> GroundedAnswerGenerator:
         if self._generator is None:
-            self._generator = BedrockNemotronGenerator(self._settings)
+            self._generator = GroundedAnswerGenerator(self._settings)
         return self._generator
 
     async def queue_document(self, filename: str, content: bytes) -> DocumentRecord:
@@ -318,8 +328,42 @@ class RagService:
             },
         )
 
+    def get_query_trace(self, trace_id: str) -> QueryTraceRecord | None:
+        payload = self._store.get_json(query_trace_key(trace_id))
+        if payload is None:
+            return None
+        return QueryTraceRecord.model_validate(payload)
+
+    def record_query_feedback(
+        self,
+        trace_id: str,
+        feedback: QueryFeedbackRequest,
+    ) -> QueryFeedbackRecord | None:
+        if self.get_query_trace(trace_id) is None:
+            return None
+
+        record = QueryFeedbackRecord(
+            trace_id=trace_id,
+            feedback_id=str(uuid.uuid4()),
+            created_at=datetime.now(timezone.utc).isoformat(),
+            rating=feedback.rating,
+            comment=feedback.comment,
+            expected_answer=feedback.expected_answer,
+        )
+        self._store.put_json(
+            query_feedback_key(trace_id, record.feedback_id),
+            record.model_dump(mode="json"),
+        )
+        metrics.increment("rag_query_feedback_total", {"rating": record.rating})
+        logger.info(
+            "Stored query feedback",
+            extra={"trace_id": trace_id, "feedback_id": record.feedback_id},
+        )
+        return record
+
     def query(self, request: QueryRequest) -> QueryResponse:
         trace_id = get_trace_id() or str(uuid.uuid4())
+        query_start = time.perf_counter()
         retrieval_mode = "hybrid" if self._settings.sparse_enabled else "dense"
         log_extra: dict[str, Any] = {
             "trace_id": trace_id,
@@ -380,9 +424,38 @@ class RagService:
         with timed(logger, "answer generation", **log_extra):
             response = self.generator.answer(request.question, top_hits, trace_id)
 
+        latency_ms = (time.perf_counter() - query_start) * 1000
+        # Persist the trace off the response path — it's observability only and
+        # the S3 write can add seconds the caller shouldn't have to wait for.
+        self._persist_query_trace_async(
+            request=request,
+            response=response,
+            top_hits=top_hits,
+            retrieval_mode=retrieval_mode,
+            latency_ms=latency_ms,
+        )
         self._observe_answer_quality(response, top_hits, retrieval_mode, log_extra)
         logger.info("Query complete (trace=%s)", trace_id, extra=log_extra)
         return response
+
+    def _persist_query_trace_async(self, **kwargs: Any) -> None:
+        """Write the query trace to S3 in a background daemon thread.
+
+        Trace persistence is best-effort observability, so a slow or failing
+        S3 write never blocks or fails the user-facing query. The request's
+        trace-id context is copied so background logs stay correlated.
+        """
+        ctx = contextvars.copy_context()
+
+        def _run_logged() -> None:
+            try:
+                ctx.run(self._save_query_trace, **kwargs)
+            except Exception:
+                logger.warning(
+                    "Background query-trace persistence failed", exc_info=True
+                )
+
+        threading.Thread(target=_run_logged, name="trace-writer", daemon=True).start()
 
     def _observe_retrieval_quality(
         self,
@@ -469,6 +542,72 @@ class RagService:
             },
         )
 
+    def _save_query_trace(
+        self,
+        *,
+        request: QueryRequest,
+        response: QueryResponse,
+        top_hits: list[RetrievalHit],
+        retrieval_mode: str,
+        latency_ms: float,
+    ) -> None:
+        trace = QueryTraceRecord(
+            trace_id=response.trace_id,
+            question=request.question,
+            route="rag",
+            retrieval_mode=retrieval_mode,
+            document_ids=request.document_ids,
+            answer=response.answer,
+            evidence_status=response.evidence_status,
+            confidence=response.confidence,
+            insufficient_evidence_reason=response.insufficient_evidence_reason,
+            citations=response.citations,
+            retrieved_hits=[_trace_hit(hit) for hit in top_hits],
+            model_ids=self._query_model_ids(),
+            latency_ms=latency_ms,
+        )
+        key = query_trace_key(response.trace_id)
+        self._store.put_json(key, trace.model_dump(mode="json"))
+        metrics.increment("rag_query_traces_stored_total", {"route": trace.route})
+        metrics.observe("rag_query_trace_latency_ms", latency_ms, {"route": trace.route})
+        logger.info(
+            "Stored query trace",
+            extra={
+                "trace_id": response.trace_id,
+                "s3_key": key,
+                "hit_count": len(top_hits),
+                "citation_count": len(response.citations),
+                "duration_ms": latency_ms,
+            },
+        )
+
+    def _query_model_ids(self) -> dict[str, str]:
+        model_ids = {
+            "embedding": getattr(self._settings, "bedrock_embedding_model_id", None),
+            "generation": getattr(self._settings, "active_llm_model_id", None),
+            "pinecone_index": getattr(self._settings, "pinecone_index_name", None),
+        }
+        if getattr(self._settings, "sparse_enabled", False):
+            model_ids["sparse"] = "bm25-msmarco-default"
+        if getattr(self._settings, "rerank_enabled", False):
+            model_ids["rerank"] = getattr(self._settings, "bedrock_rerank_model_id", None)
+        return {key: str(value) for key, value in model_ids.items() if value}
+
 
 def content_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()[:24]
+
+
+def _trace_hit(hit: RetrievalHit) -> QueryTraceHit:
+    return QueryTraceHit(
+        chunk_id=hit.chunk.id,
+        document_id=hit.chunk.document_id,
+        version=hit.chunk.version,
+        score=hit.score,
+        source=hit.source,
+        text=hit.chunk.text,
+        page_start=hit.chunk.page_start,
+        page_end=hit.chunk.page_end,
+        title=hit.chunk.metadata.get("source_filename"),
+        section_path=hit.chunk.section_path,
+    )

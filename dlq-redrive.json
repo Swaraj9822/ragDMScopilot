@@ -1,0 +1,3 @@
+{
+  "RedrivePolicy": "{\"deadLetterTargetArn\":\"arn:aws:sqs:us-east-1:310311917139:myqueuefirst-dlq\",\"maxReceiveCount\":\"5\"}"
+}

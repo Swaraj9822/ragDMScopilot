@@ -71,6 +71,8 @@ class QueryResponse(BaseModel):
     citations: list[Citation]
     evidence_status: str
     trace_id: str
+    confidence: str | None = None
+    insufficient_evidence_reason: str | None = None
 
 
 class CopilotQueryRequest(BaseModel):
@@ -106,8 +108,51 @@ class UnifiedQueryResponse(BaseModel):
     evidence_status: str
     trace_id: str
     citations: list[Citation] = Field(default_factory=list)
+    confidence: str | None = None
+    insufficient_evidence_reason: str | None = None
     sql: str | None = None
     rows: list[dict[str, Any]] = Field(default_factory=list)
     data_sources: list[CopilotDataSource] = Field(default_factory=list)
     routing_reasoning: str | None = None
+
+
+class QueryTraceHit(BaseModel):
+    chunk_id: str
+    document_id: str
+    version: str
+    score: float
+    source: str
+    text: str
+    page_start: int | None = None
+    page_end: int | None = None
+    title: str | None = None
+    section_path: list[str] = Field(default_factory=list)
+
+
+class QueryTraceRecord(BaseModel):
+    trace_id: str
+    question: str
+    route: str
+    retrieval_mode: str | None = None
+    document_ids: list[str] | None = None
+    answer: str
+    evidence_status: str
+    confidence: str | None = None
+    insufficient_evidence_reason: str | None = None
+    citations: list[Citation] = Field(default_factory=list)
+    retrieved_hits: list[QueryTraceHit] = Field(default_factory=list)
+    model_ids: dict[str, str] = Field(default_factory=dict)
+    latency_ms: float | None = None
+
+
+class QueryFeedbackRequest(BaseModel):
+    rating: int = Field(ge=1, le=5)
+    comment: str | None = Field(default=None, max_length=2000)
+    expected_answer: str | None = Field(default=None, max_length=5000)
+
+
+class QueryFeedbackRecord(QueryFeedbackRequest):
+    trace_id: str
+    feedback_id: str
+    created_at: str
 

@@ -1,7 +1,7 @@
 [project]
 name = "production-rag"
 version = "0.1.0"
-description = "Production RAG scaffold using LlamaParse, Pinecone, Bedrock Nemotron, and S3."
+description = "Production RAG scaffold using LlamaParse, Pinecone, Gemini, and S3."
 requires-python = ">=3.11"
 dependencies = [
   "beautifulsoup4>=4.12.0",

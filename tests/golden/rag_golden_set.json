@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "description": "Starter deterministic golden set for RAG answer quality checks.",
+  "cases": [
+    {
+      "id": "revenue-grounded",
+      "question": "What was revenue?",
+      "document_ids": ["doc-revenue"],
+      "expected_evidence_status": "grounded",
+      "required_answer_terms": ["revenue", "10"],
+      "forbidden_answer_terms": ["margin", "unknown"],
+      "required_citation_chunk_ids": ["doc-revenue:chunk-1"],
+      "min_citations": 1,
+      "max_citations": 1,
+      "min_confidence": "medium"
+    },
+    {
+      "id": "margin-insufficient-evidence",
+      "question": "What was margin?",
+      "document_ids": ["doc-revenue"],
+      "expected_evidence_status": "insufficient_evidence",
+      "required_answer_terms": ["not contain enough evidence"],
+      "forbidden_answer_terms": ["25%", "margin was"],
+      "min_citations": 0,
+      "max_citations": 0,
+      "min_confidence": "low",
+      "required_insufficient_reason_terms": ["margin"]
+    }
+  ]
+}

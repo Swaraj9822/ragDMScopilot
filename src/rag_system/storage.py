@@ -130,3 +130,11 @@ def embedding_manifest_key(document_id: str, version: str) -> str:
 
 def document_record_key(document_id: str) -> str:
     return f"documents/{document_id}/record.json"
+
+
+def query_trace_key(trace_id: str) -> str:
+    return f"queries/{trace_id}/trace.json"
+
+
+def query_feedback_key(trace_id: str, feedback_id: str) -> str:
+    return f"queries/{trace_id}/feedback/{feedback_id}.json"

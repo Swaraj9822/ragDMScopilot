@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from rag_system.config import Settings
+from rag_system.llm import build_text_llm
 from rag_system.models import CopilotDataSource, CopilotQueryRequest, CopilotQueryResponse
 from rag_system.observability import get_logger, get_trace_id, metrics, retry_on_transient, timed
 
@@ -193,26 +194,24 @@ class PostgresCopilotExecutor:
 
 
 class BedrockDatabaseCopilot:
+    """Database copilot SQL/answer generation backed by the configured LLM provider."""
+
     def __init__(self, settings: Settings):
-        self._client = settings.boto3_session().client("bedrock-runtime")
-        self._model_id = settings.bedrock_model_id
+        self._llm = build_text_llm(settings)
+        self._model_id = self._llm.model_id
 
     @retry_on_transient()
-    def _call_bedrock(self, prompt: str) -> str:
-        response = self._client.converse(
-            modelId=self._model_id,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"temperature": 0.0, "maxTokens": 2048},
-        )
-        return response["output"]["message"]["content"][0]["text"]
+    def _call_llm(self, prompt: str, max_tokens: int = 2048) -> str:
+        text, _usage = self._llm.generate(prompt, temperature=0.0, max_tokens=max_tokens)
+        return text
 
     def generate_sql(self, question: str, catalog: CopilotSchemaCatalog) -> str:
         prompt = build_sql_prompt(question, catalog.describe_for_prompt())
-        return _extract_sql(self._call_bedrock(prompt))
+        return _extract_sql(self._call_llm(prompt))
 
     def answer(self, question: str, sql: str, rows: list[dict[str, Any]]) -> str:
         prompt = build_database_answer_prompt(question, sql, rows)
-        return format_database_answer(self._call_bedrock(prompt), rows)
+        return format_database_answer(self._call_llm(prompt), rows)
 
 
 class DatabaseCopilotService:

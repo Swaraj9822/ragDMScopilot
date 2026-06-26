@@ -19,6 +19,8 @@ from rag_system.storage import (
     chunks_key,
     document_record_key,
     parsed_key,
+    query_feedback_key,
+    query_trace_key,
     raw_document_key,
 )
 from rag_system.worker import IngestionWorker
@@ -254,6 +256,29 @@ def test_upload_worker_query_flow_with_mocked_external_systems(monkeypatch) -> N
     ]
     assert index.searches[0]["document_ids"] == [document_id]
 
+    trace_id = answer["trace_id"]
+    trace_response = client.get(f"/queries/{trace_id}")
+    assert trace_response.status_code == 200
+    trace = trace_response.json()
+    assert trace["trace_id"] == trace_id
+    assert trace["question"] == "What was revenue?"
+    assert trace["route"] == "rag"
+    assert trace["retrieval_mode"] == "dense"
+    assert trace["answer"] == "Revenue was 10."
+    assert trace["citations"][0]["chunk_id"] == f"{document_id}:chunk-1"
+    assert trace["retrieved_hits"][0]["chunk_id"] == f"{document_id}:chunk-1"
+    assert query_trace_key(trace_id) in store.objects
+
+    feedback_response = client.post(
+        f"/queries/{trace_id}/feedback",
+        json={"rating": 5, "comment": "Looks right."},
+    )
+    assert feedback_response.status_code == 200
+    feedback = feedback_response.json()
+    assert feedback["trace_id"] == trace_id
+    assert feedback["rating"] == 5
+    assert query_feedback_key(trace_id, feedback["feedback_id"]) in store.objects
+
 
 def test_delete_document_marks_deleted_and_removes_vectors(monkeypatch) -> None:
     service, client, queue, index = _wired_app(monkeypatch)
@@ -303,6 +328,19 @@ def test_update_document_keeps_id_queues_new_version_and_replaces_vectors(monkey
     assert index.upserted[0].chunk.document_id == document_id
     assert index.upserted[0].chunk.version == updated["version"]
     assert service.get_document(document_id).status == DocumentStatus.indexed
+
+
+def test_query_trace_and_feedback_missing_trace_return_404(monkeypatch) -> None:
+    _service, client, _queue, _index = _wired_app(monkeypatch)
+
+    trace_response = client.get("/queries/missing-trace")
+    assert trace_response.status_code == 404
+
+    feedback_response = client.post(
+        "/queries/missing-trace/feedback",
+        json={"rating": 4, "comment": "Cannot attach without trace."},
+    )
+    assert feedback_response.status_code == 404
 
 
 def _service(store: IntegrationStore, queue: IntegrationQueue, index: IntegrationIndex) -> RagService:

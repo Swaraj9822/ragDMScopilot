@@ -11,7 +11,7 @@ class BedrockTitanEmbedder:
     """Embeds text using Amazon Titan Embed Text V2 via AWS Bedrock."""
 
     def __init__(self, settings: Settings):
-        self._client = settings.boto3_session().client("bedrock-runtime")
+        self._client = settings.bedrock_runtime_client()
         self._model_id = settings.bedrock_embedding_model_id
         self._dimension = settings.embedding_dimension
 
