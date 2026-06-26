@@ -11,9 +11,14 @@ class FakeStore:
         self.objects: dict[str, object] = {}
         self.uploads: list[tuple[str, str, bytes]] = []
 
-    def put_pdf(self, document_id: str, version: str, content: bytes) -> str:
+    def put_raw(self, document_id: str, version: str, filename: str, content: bytes) -> str:
         self.uploads.append((document_id, version, content))
-        return f"s3://bucket/raw/{document_id}/{version}/source.pdf"
+        suffix = filename.rsplit(".", 1)[-1] if "." in filename else "bin"
+        return f"s3://bucket/raw/{document_id}/{version}/source.{suffix}"
+
+    # Backward-compatible alias delegating to put_raw
+    def put_pdf(self, document_id: str, version: str, content: bytes) -> str:
+        return self.put_raw(document_id, version, "source.pdf", content)
 
     def put_json(self, key: str, payload: object) -> str:
         self.objects[key] = payload

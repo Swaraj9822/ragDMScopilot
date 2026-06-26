@@ -15,7 +15,12 @@ from rag_system.models import (
 )
 from rag_system.queue import ReceivedIngestionJob
 from rag_system.service import RagService
-from rag_system.storage import chunks_key, document_record_key, parsed_key, raw_pdf_key
+from rag_system.storage import (
+    chunks_key,
+    document_record_key,
+    parsed_key,
+    raw_document_key,
+)
 from rag_system.worker import IngestionWorker
 
 
@@ -36,13 +41,20 @@ class IntegrationStore:
         self.objects: dict[str, object] = {}
         self.bytes: dict[str, bytes] = {}
 
-    def put_pdf(self, document_id: str, version: str, content: bytes) -> str:
-        key = raw_pdf_key(document_id, version)
+    def put_raw(self, document_id: str, version: str, filename: str, content: bytes) -> str:
+        key = raw_document_key(document_id, version, filename)
         self.bytes[key] = content
         return f"s3://bucket/{key}"
 
+    def get_raw(self, document_id: str, version: str, filename: str) -> bytes:
+        return self.bytes[raw_document_key(document_id, version, filename)]
+
+    # Backward-compatible aliases matching the production storage interface.
+    def put_pdf(self, document_id: str, version: str, content: bytes) -> str:
+        return self.put_raw(document_id, version, "source.pdf", content)
+
     def get_pdf(self, document_id: str, version: str) -> bytes:
-        return self.bytes[raw_pdf_key(document_id, version)]
+        return self.get_raw(document_id, version, "source.pdf")
 
     def put_json(self, key: str, payload: object) -> str:
         self.objects[key] = payload
