@@ -1,0 +1,92 @@
+:root {
+  /* Dark theme (default) — "ink and signal" */
+  --bg-canvas: #0b1016;
+  --bg-surface: #111923;
+  --bg-raised: #17222e;
+  --bg-subtle: #0e151e;
+  --border-default: #273545;
+  --border-strong: #3a4a5d;
+
+  --text-primary: #f3f0e8;
+  --text-secondary: #aab4bf;
+  --text-muted: #8b97a4;
+
+  --accent: #43d6b5;
+  --accent-strong: #1fb391;
+  --accent-soft: rgba(67, 214, 181, 0.12);
+
+  --info: #79a9ff;
+  --warning: #e9ad55;
+  --danger: #ff716c;
+  --success: #5bd29a;
+  --focus: #a8f4e3;
+
+  --info-soft: rgba(121, 169, 255, 0.14);
+  --warning-soft: rgba(233, 173, 85, 0.14);
+  --danger-soft: rgba(255, 113, 108, 0.14);
+  --success-soft: rgba(91, 210, 154, 0.14);
+
+  /* Spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* Shape */
+  --radius: 10px;
+  --radius-sm: 6px;
+
+  --shadow-overlay: 0 12px 40px rgba(0, 0, 0, 0.55);
+
+  /* Typography */
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", "Cascadia Code",
+    Menlo, Consolas, monospace;
+
+  --motion-fast: 140ms;
+  --motion-base: 180ms;
+  --easing: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* Semantic z-index scale (low → high) */
+  --z-sticky: 20;
+  --z-popover: 40;
+  --z-modal-backdrop: 90;
+  --z-modal: 100;
+  --z-toast: 120;
+
+  --content-max: 1440px;
+}
+
+[data-theme="light"] {
+  --bg-canvas: #f4f6f8;
+  --bg-surface: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-subtle: #eef1f4;
+  --border-default: #d4dbe3;
+  --border-strong: #b4bfcb;
+
+  --text-primary: #16202b;
+  --text-secondary: #44525f;
+  --text-muted: #5b6975;
+
+  --accent: #0f9c80;
+  --accent-strong: #0c7d67;
+  --accent-soft: rgba(15, 156, 128, 0.12);
+
+  --info: #2563c9;
+  --warning: #a86713;
+  --danger: #c83730;
+  --success: #1d8a57;
+  --focus: #0c7d67;
+
+  --info-soft: rgba(37, 99, 201, 0.12);
+  --warning-soft: rgba(168, 103, 19, 0.14);
+  --danger-soft: rgba(200, 55, 48, 0.12);
+  --success-soft: rgba(29, 138, 87, 0.14);
+
+  --shadow-overlay: 0 12px 40px rgba(16, 32, 43, 0.18);
+}

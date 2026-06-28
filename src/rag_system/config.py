@@ -4,7 +4,7 @@ from pathlib import Path
 import boto3
 import boto3.session
 from botocore.config import Config as BotoConfig
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolve .env relative to this file so it works from any working directory
@@ -86,6 +86,60 @@ class Settings(BaseSettings):
     aws_connect_timeout_s: int = Field(default=5, alias="AWS_CONNECT_TIMEOUT_S")
     aws_read_timeout_s: int = Field(default=30, alias="AWS_READ_TIMEOUT_S")
     aws_max_attempts: int = Field(default=4, alias="AWS_MAX_ATTEMPTS")
+
+    # --- Observability / tracing platform ---
+    # New tracing settings use the existing alias mechanism (R10.9). The
+    # sample-rate and retention bounds are validated at startup (R10.6) so a
+    # misconfigured deployment fails fast through the get_settings() path.
+    tracing_enabled: bool = Field(default=True, alias="RAG_TRACING_ENABLED")
+    trace_sample_rate: float = Field(default=1.0, alias="RAG_TRACE_SAMPLE_RATE")
+    trace_retention_hours: int | None = Field(
+        default=None, alias="RAG_TRACE_RETENTION_HOURS"
+    )
+    log_retention_hours: int | None = Field(
+        default=None, alias="RAG_LOG_RETENTION_HOURS"
+    )
+    retention_interval_hours: int = Field(
+        default=24, alias="RAG_RETENTION_INTERVAL_HOURS"
+    )
+    trace_buffer_capacity: int = Field(default=10_000, alias="RAG_TRACE_BUFFER_CAPACITY")
+    log_buffer_capacity: int = Field(default=10_000, alias="RAG_LOG_BUFFER_CAPACITY")
+
+    @field_validator("trace_sample_rate")
+    @classmethod
+    def _validate_trace_sample_rate(cls, value: float) -> float:
+        """Reject a non-numeric or out-of-range sampling rate at startup (R10.6).
+
+        Pydantic already rejects values that cannot be coerced to ``float``;
+        here we additionally enforce the inclusive ``[0.0, 1.0]`` range and emit
+        an error that names the invalid value.
+        """
+        if value < 0.0 or value > 1.0:
+            raise ValueError(
+                f"invalid trace sampling rate {value!r}: must be a number "
+                "within the inclusive range [0.0, 1.0]"
+            )
+        return value
+
+    @field_validator("trace_retention_hours", "log_retention_hours")
+    @classmethod
+    def _validate_retention_hours(cls, value: int | None) -> int | None:
+        """Validate retention bounds (1 hour to 3650 days) when present (R10.6).
+
+        A retention period is optional; when configured it must fall within
+        1 hour and 3650 days (87,600 hours) inclusive.
+        """
+        if value is None:
+            return value
+        _MIN_RETENTION_HOURS = 1
+        _MAX_RETENTION_HOURS = 3650 * 24  # 87,600 hours
+        if value < _MIN_RETENTION_HOURS or value > _MAX_RETENTION_HOURS:
+            raise ValueError(
+                f"invalid retention period {value!r} hours: must be within "
+                f"{_MIN_RETENTION_HOURS} hour and {_MAX_RETENTION_HOURS} hours "
+                "(3650 days) inclusive"
+            )
+        return value
 
     def boto3_session(self) -> boto3.session.Session:
         """Return a boto3 Session pre-loaded with credentials from .env.

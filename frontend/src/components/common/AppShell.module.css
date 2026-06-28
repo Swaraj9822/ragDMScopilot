@@ -1,0 +1,131 @@
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--bg-canvas);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  height: 56px;
+  padding: 0 var(--space-6);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.mark {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  width: 22px;
+}
+.mark span {
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform-origin: left center;
+  /* One-time "signal" sweep on load: lines transmit left-to-right, staggered. */
+  animation: signal 520ms var(--easing) backwards;
+}
+.mark span:nth-child(1) {
+  width: 22px;
+  animation-delay: 0ms;
+}
+.mark span:nth-child(2) {
+  width: 15px;
+  animation-delay: 80ms;
+}
+.mark span:nth-child(3) {
+  width: 19px;
+  animation-delay: 160ms;
+}
+/* Re-pulse on hover so the mark feels responsive without being noisy. */
+.brand:hover .mark span {
+  animation: pulse 900ms var(--easing);
+}
+.brand:hover .mark span:nth-child(2) {
+  animation-delay: 90ms;
+}
+.brand:hover .mark span:nth-child(3) {
+  animation-delay: 180ms;
+}
+
+@keyframes signal {
+  from {
+    transform: scaleX(0);
+    opacity: 0;
+  }
+  to {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.brandText {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  min-width: 0;
+}
+.name {
+  font-weight: 600;
+  font-size: 15px;
+}
+.descriptor {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbarRight {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.main {
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-6);
+}
+
+/* Pages that need full viewport width (tables, waterfall) opt out via class. */
+.main:has(.fullbleed) {
+  max-width: none;
+}
+
+@media (max-width: 640px) {
+  .topbar {
+    padding: 0 var(--space-3);
+  }
+  .main {
+    padding: var(--space-3);
+  }
+  .descriptor {
+    display: none;
+  }
+}

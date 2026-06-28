@@ -1,0 +1,163 @@
+/* Shared styles for small common components. */
+
+.pageHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+  flex-wrap: wrap;
+}
+.pageTitle {
+  font-size: 24px;
+  font-weight: 600;
+}
+.pageSubtitle {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-top: var(--space-1);
+}
+.pageActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.badgeDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.routeBadge {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border-default);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.emptyState,
+.errorState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-3);
+  padding: var(--space-12) var(--space-6);
+  color: var(--text-secondary);
+}
+.emptyIcon {
+  color: var(--text-muted);
+}
+.errorIcon {
+  color: var(--danger);
+}
+.stateTitle {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.stateBody {
+  font-size: 14px;
+  max-width: 42ch;
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--bg-subtle) 25%,
+    var(--bg-raised) 37%,
+    var(--bg-subtle) 63%
+  );
+  background-size: 400% 100%;
+  border-radius: var(--radius-sm);
+  animation: shimmer 1.4s ease infinite;
+}
+@keyframes shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+
+.copyButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.codeBlock {
+  position: relative;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.codeBlockHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-default);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.codePre {
+  margin: 0;
+  padding: var(--space-3);
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.kvList {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: var(--space-1) var(--space-4);
+  font-size: 13px;
+}
+.kvKey {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-word;
+}
+.kvValue {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-word;
+}
+.kvBool {
+  color: var(--info);
+}
+.kvNum {
+  color: var(--accent);
+}
+
+.relTime {
+  cursor: default;
+}

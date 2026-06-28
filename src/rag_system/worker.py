@@ -9,6 +9,7 @@ from rag_system.observability import (
     set_trace_id,
     setup_logging,
 )
+from rag_system.observability_tracing import get_span_recorder
 from rag_system.queue import ReceivedIngestionJob, SqsIngestionQueue
 from rag_system.service import RagService
 
@@ -37,6 +38,9 @@ class IngestionWorker:
 
     async def _process_message(self, message: ReceivedIngestionJob) -> None:
         job = message.job
+        # R2.9: adopt the payload trace_id when present; R2.10: generate a new
+        # one when absent. The recorder's start_trace handles generation when
+        # trace_id is None.
         trace_id = job.trace_id or str(uuid.uuid4())
         token = set_trace_id(trace_id)
         try:
@@ -44,7 +48,13 @@ class IngestionWorker:
                 "Processing ingestion job",
                 extra={"document_id": job.document_id, "version": job.version},
             )
-            await self._service.process_document_job(job)
+            recorder = get_span_recorder()
+            # R12.1: open a Root_Span representing this ingestion job.
+            # R2.9/R2.10: adopt payload trace_id or let the recorder generate one.
+            with recorder.start_trace(
+                trace_id=job.trace_id, route="ingestion", is_root_http=False
+            ):
+                await self._service.process_document_job(job)
             self._queue.delete(message)
             metrics.increment("rag_ingestion_jobs_completed_total")
         except Exception:

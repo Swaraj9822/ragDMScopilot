@@ -1,0 +1,77 @@
+.strip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-3);
+}
+.card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cardLabel {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.cardValue {
+  font-size: 22px;
+  font-weight: 600;
+}
+.warn {
+  color: var(--warning);
+}
+.cardHint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.distBar {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-subtle);
+}
+.distSlice {
+  height: 100%;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+.infoIcon {
+  display: inline-flex;
+  color: var(--text-muted);
+  cursor: help;
+}
+
+@media (max-width: 640px) {
+  .cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

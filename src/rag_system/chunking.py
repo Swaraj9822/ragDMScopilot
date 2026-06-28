@@ -8,20 +8,22 @@ from rag_system.observability import get_logger
 logger = get_logger(__name__)
 
 
-class SemanticChunker:
-    def __init__(self, settings: Settings):
-        from llama_index.core.node_parser import SemanticSplitterNodeParser
-        from llama_index.embeddings.bedrock import BedrockEmbedding
+class DocumentChunker:
+    """Token-based sentence chunker.
 
-        session = settings.boto3_session()
-        embed_model = BedrockEmbedding(
-            model_name=settings.bedrock_embedding_model_id,
-            client=session.client("bedrock-runtime"),
-        )
-        self._splitter = SemanticSplitterNodeParser(
-            buffer_size=1,
-            breakpoint_percentile_threshold=95,
-            embed_model=embed_model,
+    Uses LlamaIndex's ``SentenceSplitter``, which splits on sentence
+    boundaries and packs sentences up to ``chunk_target_tokens`` tokens with a
+    small overlap. Unlike the previous semantic splitter, it makes no
+    per-sentence embedding calls, so chunking is effectively instant.
+    """
+
+    def __init__(self, settings: Settings):
+        from llama_index.core.node_parser import SentenceSplitter
+
+        chunk_size = max(1, settings.chunk_target_tokens)
+        self._splitter = SentenceSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=min(64, chunk_size // 8),
         )
 
     def chunk(self, parsed: ParsedDocument) -> list[Chunk]:

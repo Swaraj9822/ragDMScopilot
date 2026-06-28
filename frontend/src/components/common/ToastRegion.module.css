@@ -1,0 +1,90 @@
+.region {
+  position: fixed;
+  bottom: var(--space-6);
+  right: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  z-index: var(--z-toast);
+  max-width: min(360px, calc(100vw - 32px));
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-overlay);
+  font-size: 13px;
+  animation: slidein var(--motion-base) var(--easing);
+}
+
+/* Tone is carried by the icon color + a subtle tinted surface, not a side
+   stripe. */
+.icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.info {
+  background: color-mix(in oklab, var(--info-soft), var(--bg-raised) 55%);
+}
+.info .icon {
+  color: var(--info);
+}
+.success {
+  background: color-mix(in oklab, var(--success-soft), var(--bg-raised) 55%);
+}
+.success .icon {
+  color: var(--success);
+}
+.warning {
+  background: color-mix(in oklab, var(--warning-soft), var(--bg-raised) 55%);
+}
+.warning .icon {
+  color: var(--warning);
+}
+.error {
+  background: color-mix(in oklab, var(--danger-soft), var(--bg-raised) 55%);
+}
+.error .icon {
+  color: var(--danger);
+}
+
+.message {
+  flex: 1;
+  color: var(--text-primary);
+}
+.close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: 2px;
+  display: inline-flex;
+  border-radius: 4px;
+}
+.close:hover {
+  color: var(--text-primary);
+}
+
+@keyframes slidein {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 640px) {
+  .region {
+    left: var(--space-3);
+    right: var(--space-3);
+    bottom: var(--space-3);
+    max-width: none;
+  }
+}

@@ -7,7 +7,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
-from rag_system.chunking import SemanticChunker
+from rag_system.chunking import DocumentChunker
 from rag_system.config import Settings
 from rag_system.embedding import BedrockTitanEmbedder
 from rag_system.generation import GroundedAnswerGenerator
@@ -23,6 +23,7 @@ from rag_system.models import (
     RetrievalHit,
 )
 from rag_system.observability import get_logger, get_trace_id, metrics, timed
+from rag_system.observability_tracing import get_active_trace_id
 from rag_system.parsing import DocumentParserRouter
 from rag_system.queue import IngestionJob, SqsIngestionQueue
 from rag_system.rerank import BedrockCohereReranker
@@ -47,7 +48,7 @@ class RagService:
         self._store = S3ArtifactStore(settings)
         self._queue = SqsIngestionQueue(settings)
         self._parser: DocumentParserRouter | None = None
-        self._chunker: SemanticChunker | None = None
+        self._chunker: DocumentChunker | None = None
         self._embedder: BedrockTitanEmbedder | None = None
         self._sparse_encoder: BM25SparseEncoder | None = None
         self._index: PineconeHybridIndex | None = None
@@ -70,9 +71,9 @@ class RagService:
         return self._parser
 
     @property
-    def chunker(self) -> SemanticChunker:
+    def chunker(self) -> DocumentChunker:
         if self._chunker is None:
-            self._chunker = SemanticChunker(self._settings)
+            self._chunker = DocumentChunker(self._settings)
         return self._chunker
 
     @property
@@ -166,7 +167,7 @@ class RagService:
             version=version,
             filename=filename,
             s3_uri=s3_uri,
-            trace_id=get_trace_id(),
+            trace_id=get_active_trace_id(),
         )
         try:
             self._queue.enqueue(job)
@@ -232,17 +233,33 @@ class RagService:
             "Starting document ingestion: %s (%d bytes)", filename, len(content), extra=log_extra
         )
 
+        from rag_system.observability_tracing import get_span_recorder
+
+        recorder = get_span_recorder()
+
         try:
+            # --- Parsing stage (R12.2, R12.4, R12.5, R12.7) ---
             record = record.model_copy(update={"status": DocumentStatus.parsing, "error": None})
             self._save_document_record(record)
-            with timed(logger, "document parsing", **log_extra):
+            with recorder.record_span("document parsing") as span:
                 parsed = await self.parser.parse(document_id, version, filename, content)
+                recorder.set_ingestion_attributes(
+                    span,
+                    document_id=document_id if document_id is not None else None,
+                    document_version=version if version is not None else None,
+                )
             self._store.put_json(parsed_key(document_id, version), parsed.model_dump())
 
+            # --- Chunking stage (R12.2, R12.4, R12.5, R12.7) ---
             record = record.model_copy(update={"status": DocumentStatus.chunking, "error": None})
             self._save_document_record(record)
-            with timed(logger, "semantic chunking", **log_extra):
+            with recorder.record_span("chunking") as span:
                 chunks = self.chunker.chunk(parsed)
+                recorder.set_ingestion_attributes(
+                    span,
+                    document_id=document_id if document_id is not None else None,
+                    document_version=version if version is not None else None,
+                )
             logger.info(
                 "Produced %d chunks",
                 len(chunks),
@@ -250,10 +267,16 @@ class RagService:
             )
             self._store.put_chunks(document_id, version, chunks)
 
+            # --- Embedding stage (R12.2, R12.4, R12.5, R12.7) ---
             record = record.model_copy(update={"status": DocumentStatus.embedding, "error": None})
             self._save_document_record(record)
-            with timed(logger, "dense embedding", **log_extra):
+            with recorder.record_span("dense embedding") as span:
                 embedded = self.embedder.embed_chunks(chunks)
+                recorder.set_ingestion_attributes(
+                    span,
+                    document_id=document_id if document_id is not None else None,
+                    document_version=version if version is not None else None,
+                )
 
             if self._settings.sparse_enabled:
                 with timed(logger, "BM25 sparse encoding", **log_extra):
@@ -261,8 +284,14 @@ class RagService:
                 for ec, sv in zip(embedded, sparse_vectors, strict=True):
                     ec.sparse_vector = sv
 
-            with timed(logger, "Pinecone upsert", **log_extra):
+            # --- Indexing stage (R12.2, R12.4, R12.5, R12.7) ---
+            with recorder.record_span("Pinecone upsert") as span:
                 self.index.upsert(embedded)
+                recorder.set_ingestion_attributes(
+                    span,
+                    document_id=document_id if document_id is not None else None,
+                    document_version=version if version is not None else None,
+                )
 
             self._store.put_json(
                 embedding_manifest_key(document_id, version),
@@ -285,6 +314,10 @@ class RagService:
             logger.info("Ingestion complete for %s", filename, extra=log_extra)
             return final
         except Exception as exc:
+            # R12.6: The record_span context manager automatically sets the
+            # failing stage span status to "error" and records the exception.
+            # The root span opened by the worker also gets status "error"
+            # because the exception propagates out of start_trace.
             logger.error(
                 "Ingestion failed for %s: %s",
                 record.title,

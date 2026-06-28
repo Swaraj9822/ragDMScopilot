@@ -1,0 +1,109 @@
+.waterfall {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ruler {
+  position: relative;
+  height: 16px;
+  margin-left: 40%;
+  border-bottom: 1px solid var(--border-default);
+}
+.tick {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+.tick:first-child {
+  transform: translateX(0);
+}
+.tick:last-child {
+  transform: translateX(-100%);
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rowButton {
+  display: grid;
+  grid-template-columns: 38% 1fr 70px;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 32px;
+  padding: 0 var(--space-2);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+.rowButton:hover {
+  background: var(--bg-raised);
+}
+.selected {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.label {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.track {
+  position: relative;
+  height: 14px;
+  background: var(--bg-subtle);
+  border-radius: 3px;
+}
+.bar {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 3px;
+  min-width: 2px;
+  animation: grow var(--motion-base) var(--easing);
+  transform-origin: left center;
+}
+.barOk {
+  background: var(--accent);
+}
+.barError {
+  background: var(--danger);
+}
+.barSelected {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.duration {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  text-align: right;
+}
+
+@keyframes grow {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar {
+    animation: none;
+  }
+}

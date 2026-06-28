@@ -24,3 +24,14 @@ build/
 .vscode/
 .idea/
 *.swp
+
+# Logs
+*.err.log
+*.out.log
+
+# Misc
+*.pdf
+.hypothesis/
+node_modules/
+frontend/node_modules/
+frontend1/node_modules/

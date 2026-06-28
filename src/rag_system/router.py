@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextvars
 import json
 import re
 import uuid
@@ -22,6 +21,7 @@ from rag_system.models import (
     UnifiedQueryResponse,
 )
 from rag_system.observability import get_logger, get_trace_id, metrics, retry_on_transient, timed
+from rag_system.observability_tracing.context import propagate_into_thread
 
 logger = get_logger(__name__)
 
@@ -233,16 +233,17 @@ class AgenticRouter:
 
         # RAG and the database copilot are independent lookups — run them
         # concurrently so the shorter branch is hidden under the longer one.
-        # copy_context() propagates the request trace-id into the worker threads
-        # so their logs stay correlated.
+        # propagate_into_thread copies the trace/span context into the worker
+        # threads so spans created in each branch attach to the originating
+        # trace (R2.3, R2.6).
         with timed(logger, "hybrid parallel lookup (RAG + database)", **log_extra):
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hybrid") as pool:
-                rag_ctx = contextvars.copy_context()
-                copilot_ctx = contextvars.copy_context()
-                rag_future = pool.submit(rag_ctx.run, self._rag.query, rag_request)
-                copilot_future = pool.submit(
-                    copilot_ctx.run, self._copilot.query, copilot_request
+                rag_fn = propagate_into_thread(lambda: self._rag.query(rag_request))
+                copilot_fn = propagate_into_thread(
+                    lambda: self._copilot.query(copilot_request)
                 )
+                rag_future = pool.submit(rag_fn)
+                copilot_future = pool.submit(copilot_fn)
                 rag_response = rag_future.result()
                 copilot_response = copilot_future.result()
 
