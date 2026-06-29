@@ -40,7 +40,10 @@ from rag_system.observability_tracing.models import (
     StoredTrace,
     Trace,
 )
-from rag_system.observability_tracing.recorder import SpanRecorder
+from rag_system.observability_tracing.recorder import (
+    QUERY_SUMMARY_OPERATION,
+    SpanRecorder,
+)
 from rag_system.observability_tracing.serializer import (
     TraceDeserializationError,
     TraceSerializationError,
@@ -73,6 +76,7 @@ __all__ = [
     "get_span_recorder",
     "group_spans_by_trace",
     "propagate_into_thread",
+    "record_query_summary",
     "restore_span",
 ]
 
@@ -103,3 +107,25 @@ def get_span_recorder() -> SpanRecorder:
         span_buffer=span_buffer,
         metrics=app_metrics,
     )
+
+
+def record_query_summary(question: str, confidence_score: float | None) -> None:
+    """Record a per-request query-summary span on the active trace.
+
+    Captures the question, the numeric confidence score, and the total LLM
+    tokens spent across the whole request (read from the per-request tally).
+    This is a near-zero-duration span whose attributes power the Individual
+    Query view. Best-effort: when tracing is disabled or the trace was not
+    sampled, the recorder yields a no-op span and nothing is persisted.
+    """
+    from rag_system.observability import get_token_total
+
+    recorder = get_span_recorder()
+    total = get_token_total()
+    with recorder.record_span(QUERY_SUMMARY_OPERATION) as span:
+        recorder.set_query_summary_attributes(
+            span,
+            question=question,
+            confidence_score=confidence_score,
+            total_tokens=total if total > 0 else None,
+        )

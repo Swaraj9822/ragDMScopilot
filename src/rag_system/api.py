@@ -1,16 +1,20 @@
+import asyncio
 import logging
 import re
+import threading
 import time
 import uuid
+import json as _json
 from datetime import datetime
 from functools import lru_cache
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from rag_system.config import get_settings
 from rag_system.copilot import DatabaseCopilotService, SqlValidationError
+from rag_system.observability_tracing import get_span_recorder
 from rag_system.observability_tracing.buffers import BoundedLogBuffer
 from rag_system.observability_tracing.flush_workers import LogFlushWorker, TraceFlushWorker
 from rag_system.observability_tracing.log_handler import TracePersistingLogHandler
@@ -39,6 +43,7 @@ from rag_system.models import (
 from rag_system.observability import (
     get_logger,
     metrics,
+    reset_token_counter,
     reset_trace_id,
     set_trace_id,
     setup_logging,
@@ -225,8 +230,11 @@ _MAX_LOG_LIMIT = 1000
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start = time.perf_counter()
-    trace_id = request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+    trace_id = request.headers.get("X-Trace-Id") or uuid.uuid4().hex
     token = set_trace_id(trace_id)
+    # Begin a fresh per-request LLM token tally so any generation triggered by
+    # this request (including parallel hybrid branches) is summed for its trace.
+    reset_token_counter()
     logger.info(
         "→ %s %s",
         request.method,
@@ -234,7 +242,22 @@ async def log_requests(request: Request, call_next):
         extra={"method": request.method, "path": request.url.path},
     )
     try:
-        response = await call_next(request)
+        # The streaming endpoint's response body is consumed by the server
+        # *after* this middleware returns, so wrapping it in start_trace here
+        # would close the trace before the streaming work runs. /ask/stream
+        # opens and owns its own trace inside the response generator instead.
+        if request.url.path == "/ask/stream":
+            response = await call_next(request)
+        else:
+            # Open the request's Root_Span so the call is captured as a trace in
+            # the observability platform (R1.1). The recorder adopts the
+            # trace_id we just established, times the request, marks the root
+            # error if call_next raises, and enqueues the trace for off-path
+            # persistence.
+            with get_span_recorder().start_trace(
+                trace_id=trace_id, route=request.url.path, is_root_http=True
+            ):
+                response = await call_next(request)
     except Exception:
         elapsed_ms = (time.perf_counter() - start) * 1000
         labels = {
@@ -433,6 +456,89 @@ def ask(request: UnifiedQueryRequest) -> UnifiedQueryResponse:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except SqlValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _format_sse(event: dict) -> str:
+    """Serialize an event dict as a Server-Sent Event frame."""
+    payload = _json.dumps(event, default=str, ensure_ascii=False)
+    return f"event: {event['type']}\ndata: {payload}\n\n"
+
+
+@app.post("/ask/stream")
+async def ask_stream(request: UnifiedQueryRequest, http_request: Request) -> StreamingResponse:
+    """Streaming variant of /ask.
+
+    Returns Server-Sent Events: ``meta`` (route), ``status`` (pipeline stage),
+    ``delta`` (incremental answer text), and a terminal ``final`` event with the
+    full structured payload (citations, sql, rows, confidence). Errors are
+    delivered as an ``error`` event rather than an HTTP status, since the
+    response has already started streaming.
+
+    The synchronous router generator is run in a single dedicated thread so the
+    whole request shares one contextvars context (trace id, span stack, token
+    tally). Driving it via Starlette's per-iteration threadpool would copy the
+    context on every step and break trace/token propagation, so events are
+    bridged to the async response through a queue instead.
+    """
+    logger.info(
+        "Unified streaming query received (%d chars)",
+        len(request.question),
+        extra={"query_len": len(request.question)},
+    )
+    # Adopt the caller's trace id (the console always sends one) so the trace is
+    # clickable from the answer; generate one otherwise.
+    trace_id = http_request.headers.get("X-Trace-Id") or uuid.uuid4().hex
+    router = get_router()
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    sentinel = object()
+
+    def produce() -> None:
+        # Runs in one fresh thread → one stable contextvars context for the
+        # entire stream, so the trace, span stack, and token tally are coherent.
+        set_trace_id(trace_id)
+        reset_token_counter()
+        recorder = get_span_recorder()
+
+        def emit(event: dict) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, _format_sse(event))
+
+        try:
+            with recorder.start_trace(
+                trace_id=trace_id, route="/ask/stream", is_root_http=True
+            ):
+                for event in router.query_stream(request):
+                    emit(event)
+        except SqlValidationError as exc:
+            emit({"type": "error", "detail": str(exc)})
+        except (FileNotFoundError, RuntimeError) as exc:
+            emit({"type": "error", "detail": str(exc)})
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Streaming query failed")
+            emit({"type": "error", "detail": "Internal error while streaming the answer."})
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, sentinel)
+
+    threading.Thread(target=produce, name="ask-stream", daemon=True).start()
+
+    async def event_stream():
+        while True:
+            item = await queue.get()
+            if item is sentinel:
+                break
+            yield item
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Disable proxy buffering so events flush immediately (e.g. nginx).
+            "X-Accel-Buffering": "no",
+            "X-Trace-Id": trace_id,
+        },
+    )
 
 
 @app.post("/query", response_model=QueryResponse)

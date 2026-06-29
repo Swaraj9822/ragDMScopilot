@@ -72,6 +72,7 @@ class QueryResponse(BaseModel):
     evidence_status: str
     trace_id: str
     confidence: str | None = None
+    confidence_score: float | None = Field(default=None, ge=0.0, le=1.0)
     insufficient_evidence_reason: str | None = None
 
 
@@ -90,6 +91,7 @@ class CopilotQueryResponse(BaseModel):
     mode: str
     evidence_status: str
     trace_id: str
+    confidence_score: float | None = Field(default=None, ge=0.0, le=1.0)
     sql: str | None = None
     rows: list[dict[str, Any]] = Field(default_factory=list)
     data_sources: list[CopilotDataSource] = Field(default_factory=list)
@@ -109,6 +111,7 @@ class UnifiedQueryResponse(BaseModel):
     trace_id: str
     citations: list[Citation] = Field(default_factory=list)
     confidence: str | None = None
+    confidence_score: float | None = Field(default=None, ge=0.0, le=1.0)
     insufficient_evidence_reason: str | None = None
     sql: str | None = None
     rows: list[dict[str, Any]] = Field(default_factory=list)
@@ -138,6 +141,7 @@ class QueryTraceRecord(BaseModel):
     answer: str
     evidence_status: str
     confidence: str | None = None
+    confidence_score: float | None = Field(default=None, ge=0.0, le=1.0)
     insufficient_evidence_reason: str | None = None
     citations: list[Citation] = Field(default_factory=list)
     retrieved_hits: list[QueryTraceHit] = Field(default_factory=list)

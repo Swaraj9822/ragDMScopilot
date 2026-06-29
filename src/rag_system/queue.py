@@ -28,7 +28,9 @@ class SqsIngestionQueue:
         self._queue_url = settings.ingestion_queue_url
         self._poll_seconds = settings.ingestion_poll_seconds
         self._max_messages = settings.ingestion_max_messages
-        self._client = settings.boto3_session().client("sqs")
+        self._client = settings.boto3_session().client(
+            "sqs", config=settings.boto3_client_config()
+        )
         logger.info("SqsIngestionQueue initialised")
 
     @retry_on_transient()

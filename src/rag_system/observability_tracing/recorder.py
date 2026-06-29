@@ -46,7 +46,9 @@ from .models import Span, Trace
 
 __all__ = [
     "MAX_EXCEPTION_MESSAGE_LENGTH",
+    "MAX_QUESTION_LENGTH",
     "NO_SCORE",
+    "QUERY_SUMMARY_OPERATION",
     "ROOT_SPAN_OPERATION",
     "UNAVAILABLE",
     "SpanRecorder",
@@ -57,6 +59,12 @@ MAX_EXCEPTION_MESSAGE_LENGTH = 4096
 
 #: Operation label used for the Root_Span of every trace.
 ROOT_SPAN_OPERATION = "Root_Span"
+
+#: Operation label used for the per-request query summary span.
+QUERY_SUMMARY_OPERATION = "query summary"
+
+#: Maximum stored length of a recorded question attribute.
+MAX_QUESTION_LENGTH = 500
 
 #: Explicit sentinel recorded when an expected attribute value is missing — e.g.
 #: a model id or token count the LLM provider did not return (R3.2), or a
@@ -177,6 +185,8 @@ class SpanRecorder:
                 duration_ms=0,
                 status="success",
                 attributes={},
+                trace_id=resolved_trace_id,
+                route=route,
             )
             Trace(
                 trace_id=resolved_trace_id,
@@ -264,6 +274,9 @@ class SpanRecorder:
                 duration_ms=0,
                 status="success",
                 attributes={},
+                # Stamp the owning trace so the off-path flush worker can group
+                # this span with its trace without any external context (R9.1).
+                trace_id=self._propagator.get_active_trace_id(),
             )
             # Route the supplied attributes through the scalar-coercion layer so
             # non-scalar values are stringified before being attached (R3.7).
@@ -399,6 +412,35 @@ class SpanRecorder:
             citation_count=citation_count,
         )
 
+    def set_query_summary_attributes(
+        self,
+        span: Span,
+        *,
+        question: str,
+        confidence_score: float | None = None,
+        total_tokens: int | None = None,
+    ) -> None:
+        """Record a per-request query summary on *span*.
+
+        Captures the user-facing question, the numeric confidence score, and the
+        total LLM tokens consumed across the whole request. Absent numeric values
+        are recorded with the :data:`UNAVAILABLE` sentinel. The question is
+        truncated to keep span payloads bounded. The ``summary_kind`` marker lets
+        consumers (e.g. the Individual Query view) find this span unambiguously.
+        """
+        trimmed = question.strip()
+        if len(trimmed) > MAX_QUESTION_LENGTH:
+            trimmed = trimmed[: MAX_QUESTION_LENGTH - 1].rstrip() + "\u2026"
+        self.set_attributes(
+            span,
+            summary_kind="query",
+            question=trimmed,
+            confidence_score=(
+                confidence_score if confidence_score is not None else UNAVAILABLE
+            ),
+            total_tokens=total_tokens if total_tokens is not None else UNAVAILABLE,
+        )
+
     def set_document_id(self, span: Span, document_id: Any) -> None:
         """Record the document identifier on *span* as a string attribute (R3.6).
 
@@ -413,18 +455,23 @@ class SpanRecorder:
         *,
         document_id: str | None = None,
         document_version: Any = None,
+        source_filename: str | None = None,
     ) -> None:
         """Record ingestion-stage span attributes (R12.4, R12.5).
 
-        Records the document identifier and document version. When either is
-        unavailable (passed as ``None``), the corresponding attribute is recorded
-        with the :data:`UNAVAILABLE` sentinel.
+        Records the document identifier, document version, and (when known) the
+        original source filename so the Individual Query view can label an
+        upload. When a value is unavailable (passed as ``None``), the
+        corresponding attribute is recorded with the :data:`UNAVAILABLE` sentinel.
         """
         self.set_attributes(
             span,
             document_id=document_id if document_id is not None else UNAVAILABLE,
             document_version=(
                 document_version if document_version is not None else UNAVAILABLE
+            ),
+            source_filename=(
+                source_filename if source_filename is not None else UNAVAILABLE
             ),
         )
 

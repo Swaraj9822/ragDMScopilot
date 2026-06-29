@@ -1,14 +1,19 @@
 import json
 import re
 from textwrap import dedent
-from typing import Any
+from typing import Any, Iterator
 
 from rag_system.config import Settings
+from rag_system.confidence import rag_confidence_score
 from rag_system.llm import build_text_llm
 from rag_system.models import Citation, QueryResponse, RetrievalHit
 from rag_system.observability import get_logger, metrics, retry_on_transient
 
 logger = get_logger(__name__)
+
+#: Marker separating the streamed prose answer from the trailing JSON metadata
+#: in the streaming grounded-answer contract.
+META_MARKER = "###META###"
 
 
 class GroundedAnswerGenerator:
@@ -112,14 +117,142 @@ class GroundedAnswerGenerator:
             )
 
         evidence_status = _evidence_status(hits, citations, insufficient_reason)
+        confidence_score = rag_confidence_score(
+            evidence_status=evidence_status,
+            model_confidence=confidence,
+            retrieval_scores=[hit.score for hit in hits],
+            citation_count=len(citations),
+            hit_count=len(hits),
+            has_insufficient_reason=bool(insufficient_reason),
+            avg_logprob=usage.get("avgLogprob") if isinstance(usage, dict) else None,
+        )
+        metrics.observe(
+            "rag_generation_confidence_score",
+            confidence_score,
+            {"model_id": self._model_id, "evidence_status": evidence_status},
+        )
         return QueryResponse(
             answer=answer_text,
             citations=citations,
             evidence_status=evidence_status,
             trace_id=trace_id,
             confidence=confidence,
+            confidence_score=confidence_score,
             insufficient_evidence_reason=insufficient_reason,
         )
+
+    def answer_stream(
+        self, question: str, hits: list[RetrievalHit], trace_id: str
+    ) -> Iterator[dict[str, Any]]:
+        """Stream a grounded answer.
+
+        Yields ``{"type": "delta", "text": ...}`` events as the prose answer is
+        produced, then a single ``{"type": "final", "response": QueryResponse}``
+        carrying citations, confidence, and the numeric confidence score.
+
+        The model is prompted to emit the answer as prose followed by a
+        ``META_MARKER`` line and a small JSON metadata object. We stream the
+        prose and parse the trailing metadata once the stream completes — a
+        single LLM call that preserves the existing grounding/citation logic.
+        """
+        log_extra = {"trace_id": trace_id, "hit_count": len(hits), "model_id": self._model_id}
+        candidate_citations = [
+            Citation(
+                document_id=hit.chunk.document_id,
+                chunk_id=hit.chunk.id,
+                page_start=hit.chunk.page_start,
+                page_end=hit.chunk.page_end,
+                title=hit.chunk.metadata.get("source_filename"),
+            )
+            for hit in hits
+        ]
+        context = "\n\n".join(
+            f"[{index}] chunk_id={hit.chunk.id} document={hit.chunk.document_id} "
+            f"pages={hit.chunk.page_start}-{hit.chunk.page_end}\n{hit.chunk.text}"
+            for index, hit in enumerate(hits, start=1)
+        )
+        prompt = build_grounded_stream_prompt(question, context)
+        logger.info(
+            "Streaming LLM %s (context=%d chars, %d citations)",
+            self._model_id,
+            len(context),
+            len(candidate_citations),
+            extra=log_extra,
+        )
+
+        buffer = ""
+        emitted = 0
+        marker_len = len(META_MARKER)
+        for piece in self._llm.generate_stream(prompt, temperature=0.1, max_tokens=4096):
+            buffer += piece
+            idx = buffer.find(META_MARKER)
+            if idx != -1:
+                # Emit any answer text up to the marker, then stop forwarding —
+                # everything after the marker is metadata, not answer prose.
+                if idx > emitted:
+                    yield {"type": "delta", "text": buffer[emitted:idx]}
+                    emitted = idx
+            else:
+                # Hold back the last (marker_len - 1) chars so a marker split
+                # across chunk boundaries is never emitted as answer text.
+                safe = len(buffer) - (marker_len - 1)
+                if safe > emitted:
+                    yield {"type": "delta", "text": buffer[emitted:safe]}
+                    emitted = safe
+
+        marker_idx = buffer.find(META_MARKER)
+        if marker_idx != -1:
+            answer_text = buffer[:marker_idx].strip()
+            meta_raw = buffer[marker_idx + marker_len :].strip()
+        else:
+            # No marker — flush whatever prose we were holding back and treat
+            # the whole buffer as the answer with no structured metadata.
+            if len(buffer) > emitted:
+                yield {"type": "delta", "text": buffer[emitted:]}
+            answer_text = buffer.strip()
+            meta_raw = ""
+
+        parsed = _parse_structured_answer(meta_raw) if meta_raw else None
+        if parsed is None:
+            used_chunk_ids = [citation.chunk_id for citation in candidate_citations]
+            confidence = "medium" if hits else "low"
+            insufficient_reason = None if hits else "No retrieved evidence."
+        else:
+            used_chunk_ids = _extract_used_citation_ids(parsed)
+            confidence = _normalise_confidence(parsed.get("confidence"))
+            reason = parsed.get("insufficient_evidence_reason")
+            insufficient_reason = str(reason).strip() if reason else None
+
+        if not answer_text:
+            answer_text = "The available documents do not contain enough evidence."
+
+        citations = _validate_citations(candidate_citations, used_chunk_ids)
+        evidence_status = _evidence_status(hits, citations, insufficient_reason)
+        confidence_score = rag_confidence_score(
+            evidence_status=evidence_status,
+            model_confidence=confidence,
+            retrieval_scores=[hit.score for hit in hits],
+            citation_count=len(citations),
+            hit_count=len(hits),
+            has_insufficient_reason=bool(insufficient_reason),
+        )
+        metrics.observe(
+            "rag_generation_confidence_score",
+            confidence_score,
+            {"model_id": self._model_id, "evidence_status": evidence_status},
+        )
+        yield {
+            "type": "final",
+            "response": QueryResponse(
+                answer=answer_text,
+                citations=citations,
+                evidence_status=evidence_status,
+                trace_id=trace_id,
+                confidence=confidence,
+                confidence_score=confidence_score,
+                insufficient_evidence_reason=insufficient_reason,
+            ),
+        }
 
 
 def build_grounded_prompt(question: str, context: str) -> str:
@@ -147,6 +280,39 @@ def build_grounded_prompt(question: str, context: str) -> str:
 
         If the context is insufficient, use an empty used_citation_ids list, set confidence to "low", and explain why in insufficient_evidence_reason.
         Do not invent facts outside the context.
+        """
+    ).strip()
+
+
+def build_grounded_stream_prompt(question: str, context: str) -> str:
+    """Prompt for the streaming contract: prose answer, then a metadata tail.
+
+    The answer is streamed to the user as plain prose; the trailing
+    ``META_MARKER`` + JSON block carries citations/confidence and is parsed
+    server-side once the stream completes (it is never shown to the user).
+    """
+    if not context.strip():
+        context = "No retrieved evidence."
+    return dedent(
+        f"""
+        You are answering questions over a private business PDF corpus.
+        Use only the provided context. If the context is insufficient, say that the available documents do not contain enough evidence.
+
+        First, write the answer for the user in clear plain prose. Do not use JSON or any preamble for the answer.
+        After the complete answer, output a single line containing exactly:
+        {META_MARKER}
+        and immediately after it a single-line JSON object with this exact shape:
+        {{"used_citation_ids": ["chunk_id from context"], "confidence": "high|medium|low", "insufficient_evidence_reason": null}}
+
+        Cite evidence only by using chunk_id values that appear in the context.
+        If the context is insufficient, write that in the prose answer, then set used_citation_ids to an empty list, confidence to "low", and explain why in insufficient_evidence_reason.
+        Do not invent facts outside the context.
+
+        Question:
+        {question}
+
+        Context:
+        {context}
         """
     ).strip()
 

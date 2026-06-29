@@ -1,0 +1,89 @@
+.strip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-3);
+}
+.card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-shadow: var(--shadow-card);
+  transition: all var(--motion-fast) var(--easing);
+}
+.card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-elevated);
+}
+.cardLabel {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+}
+.cardValue {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.warn {
+  color: var(--warning);
+}
+.cardHint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.distBar {
+  display: flex;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bg-subtle);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+.distSlice {
+  height: 100%;
+  transition: width var(--motion-base) var(--easing);
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+.infoIcon {
+  display: inline-flex;
+  color: var(--text-muted);
+  cursor: help;
+}
+
+@media (max-width: 640px) {
+  .cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

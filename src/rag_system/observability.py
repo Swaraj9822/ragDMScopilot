@@ -75,6 +75,94 @@ def reset_trace_id(token: Any) -> None:
     _TRACE_ID.reset(token)
 
 
+# ---------------------------------------------------------------------------
+# Per-request LLM token accounting
+#
+# A single request (e.g. POST /ask) may trigger several LLM calls — routing
+# classification, RAG generation, SQL generation, SQL answer, hybrid synthesis.
+# We tally the token usage of every call into one mutable counter held on a
+# context variable. Because ``contextvars.copy_context`` copies *references*,
+# worker threads spawned for hybrid lookups (via ``propagate_into_thread``)
+# share the very same counter object, so their token usage is included in the
+# total without any thread-to-thread plumbing.
+# ---------------------------------------------------------------------------
+
+
+class _TokenCounter:
+    """Thread-safe additive counter shared across a request's worker threads."""
+
+    __slots__ = ("_value", "_lock")
+
+    def __init__(self) -> None:
+        self._value = 0
+        self._lock = RLock()
+
+    def add(self, amount: int) -> None:
+        with self._lock:
+            self._value += amount
+
+    @property
+    def value(self) -> int:
+        with self._lock:
+            return self._value
+
+
+_TOKEN_COUNTER: ContextVar[_TokenCounter | None] = ContextVar(
+    "rag_token_counter", default=None
+)
+
+
+def reset_token_counter() -> None:
+    """Begin a fresh per-request token tally. Call once at request entry."""
+    _TOKEN_COUNTER.set(_TokenCounter())
+
+
+def add_tokens(amount: Any) -> None:
+    """Add LLM token usage to the active per-request tally, if one exists."""
+    counter = _TOKEN_COUNTER.get()
+    if counter is None or not isinstance(amount, (int, float)):
+        return
+    counter.add(int(amount))
+
+
+def get_token_total() -> int:
+    """Total LLM tokens used so far in the active request (0 when untracked)."""
+    counter = _TOKEN_COUNTER.get()
+    return counter.value if counter is not None else 0
+
+
+# ---------------------------------------------------------------------------
+# Unified-query nesting guard
+#
+# The agentic router (/ask) calls the RAG and database copilot services
+# internally. Without a guard each of those would record its own "query
+# summary" span, so a single /ask trace would carry two or three summaries.
+# The router claims ownership for the duration of its routing so nested
+# services skip recording and exactly one summary lands on the trace.
+# ---------------------------------------------------------------------------
+
+_UNIFIED_ACTIVE: ContextVar[bool] = ContextVar("rag_unified_active", default=False)
+
+
+@contextmanager
+def unified_query_scope() -> Generator[None, None, None]:
+    """Mark the unified router as the owner of this request's query summary."""
+    # Save/restore the previous value rather than using a ContextVar Token:
+    # tokens cannot be reset in a different context than they were created in,
+    # which is fragile around generators and thread hand-offs.
+    previous = _UNIFIED_ACTIVE.get()
+    _UNIFIED_ACTIVE.set(True)
+    try:
+        yield
+    finally:
+        _UNIFIED_ACTIVE.set(previous)
+
+
+def is_unified_active() -> bool:
+    """True when a unified (/ask) router owns the current request's summary."""
+    return _UNIFIED_ACTIVE.get()
+
+
 class _TraceContextFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if not hasattr(record, "trace_id"):

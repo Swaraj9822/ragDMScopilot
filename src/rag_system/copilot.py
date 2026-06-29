@@ -3,14 +3,23 @@ import re
 import uuid
 from pathlib import Path
 from textwrap import dedent
-from typing import Any
+from typing import Any, Iterator
 
 from pydantic import BaseModel, Field
 
 from rag_system.config import Settings
+from rag_system.confidence import database_confidence_score
 from rag_system.llm import build_text_llm
 from rag_system.models import CopilotDataSource, CopilotQueryRequest, CopilotQueryResponse
-from rag_system.observability import get_logger, get_trace_id, metrics, retry_on_transient, timed
+from rag_system.observability import (
+    get_logger,
+    get_trace_id,
+    is_unified_active,
+    metrics,
+    retry_on_transient,
+    timed,
+)
+from rag_system.observability_tracing import record_query_summary
 
 logger = get_logger(__name__)
 
@@ -213,6 +222,19 @@ class BedrockDatabaseCopilot:
         prompt = build_database_answer_prompt(question, sql, rows)
         return format_database_answer(self._call_llm(prompt), rows)
 
+    def answer_stream(
+        self, question: str, sql: str, rows: list[dict[str, Any]]
+    ) -> Iterator[str]:
+        """Stream a plain-prose business answer for the SQL result.
+
+        Unlike :meth:`answer` (which assembles a structured summary/results/
+        conclusion block), the streaming variant emits a concise prose answer
+        token by token. The SQL and result rows travel in the final event so
+        the client renders them as a table.
+        """
+        prompt = build_database_stream_prompt(question, sql, rows)
+        yield from self._llm.generate_stream(prompt, temperature=0.0, max_tokens=2048)
+
 
 class DatabaseCopilotService:
     def __init__(self, settings: Settings):
@@ -262,15 +284,86 @@ class DatabaseCopilotService:
             answer = self.generator.answer(request.question, sql, rows)
 
         evidence_status = "grounded" if rows else "no_rows"
+        # The guard already validated the SQL (it raises otherwise), so a
+        # query that reaches this point passed validation.
+        confidence_score = database_confidence_score(
+            evidence_status=evidence_status,
+            row_count=len(rows),
+            sql_validated=True,
+        )
+        metrics.observe(
+            "rag_copilot_confidence_score",
+            confidence_score,
+            {"evidence_status": evidence_status},
+        )
+        if not is_unified_active():
+            record_query_summary(request.question, confidence_score)
         return CopilotQueryResponse(
             answer=answer,
             mode="database",
             evidence_status=evidence_status,
             trace_id=trace_id,
+            confidence_score=confidence_score,
             sql=sql if request.include_sql else None,
             rows=rows if request.include_sql else [],
             data_sources=self.guard.data_sources(sql),
         )
+
+    def query_stream(self, request: CopilotQueryRequest) -> Iterator[dict[str, Any]]:
+        """Stream a database-copilot answer.
+
+        Emits status events while SQL is generated, validated, and executed
+        (which cannot be streamed), then streams the prose answer, then a final
+        event with the structured payload (sql, rows, confidence).
+        """
+        trace_id = get_trace_id() or str(uuid.uuid4())
+        log_extra = {"trace_id": trace_id, "query_len": len(request.question), "mode": "database"}
+        logger.info("Processing copilot query (streaming)", extra=log_extra)
+        metrics.increment("rag_copilot_queries_total", {"mode": "database"})
+
+        yield {"type": "status", "stage": "generating_sql"}
+        with timed(logger, "copilot SQL generation", **log_extra):
+            sql = self.generator.generate_sql(request.question, self.catalog)
+        with timed(logger, "copilot SQL validation", **log_extra):
+            sql = self.guard.validate(sql)
+        yield {"type": "status", "stage": "running_sql"}
+        with timed(logger, "copilot SQL execution", **log_extra):
+            rows = self.executor.execute(sql)
+
+        yield {"type": "status", "stage": "generating"}
+        answer_parts: list[str] = []
+        with timed(logger, "copilot answer generation (streaming)", **log_extra):
+            for piece in self.generator.answer_stream(request.question, sql, rows):
+                answer_parts.append(piece)
+                yield {"type": "delta", "text": piece}
+        answer = "".join(answer_parts).strip()
+
+        evidence_status = "grounded" if rows else "no_rows"
+        confidence_score = database_confidence_score(
+            evidence_status=evidence_status,
+            row_count=len(rows),
+            sql_validated=True,
+        )
+        metrics.observe(
+            "rag_copilot_confidence_score",
+            confidence_score,
+            {"evidence_status": evidence_status},
+        )
+        if not is_unified_active():
+            record_query_summary(request.question, confidence_score)
+        yield {
+            "type": "final",
+            "response": CopilotQueryResponse(
+                answer=answer,
+                mode="database",
+                evidence_status=evidence_status,
+                trace_id=trace_id,
+                confidence_score=confidence_score,
+                sql=sql if request.include_sql else None,
+                rows=rows if request.include_sql else [],
+                data_sources=self.guard.data_sources(sql),
+            ),
+        }
 
 
 def build_sql_prompt(question: str, catalog_description: str) -> str:
@@ -291,6 +384,29 @@ def build_sql_prompt(question: str, catalog_description: str) -> str:
 
         User question:
         {question}
+        """
+    ).strip()
+
+
+def build_database_stream_prompt(question: str, sql: str, rows: list[dict[str, Any]]) -> str:
+    """Prompt for a streamed plain-prose answer over the SQL result."""
+    result_json = json.dumps(rows, default=str, ensure_ascii=False)
+    return dedent(
+        f"""
+        You answer stakeholder questions using only the SQL result provided.
+        Write a concise, business-friendly answer in plain prose (2-4 sentences).
+        State the key figures from the result. If the result is empty, say no
+        matching rows were found. Do not invent values not supported by the
+        result, and do not output JSON or markdown tables.
+
+        Question:
+        {question}
+
+        SQL:
+        {sql}
+
+        SQL result JSON:
+        {result_json}
         """
     ).strip()
 

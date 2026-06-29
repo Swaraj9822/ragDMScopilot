@@ -86,8 +86,20 @@ _MAX_LIMIT = 1000
 INSERT_TRACE_SQL = """
     INSERT INTO traces (trace_id, route, start_ts, duration_ms, root_status)
     VALUES (%s, %s, %s::timestamptz, %s, %s)
+    ON CONFLICT (trace_id) DO UPDATE SET
+        route = EXCLUDED.route,
+        start_ts = EXCLUDED.start_ts,
+        duration_ms = EXCLUDED.duration_ms,
+        root_status = EXCLUDED.root_status
 """
-"""Insert a single ``traces`` row (R5.2)."""
+"""Upsert a single ``traces`` row (R5.2).
+
+A trace's spans may be drained across more than one flush cycle (a long request
+closes its child spans well before its root). Each cycle persists the spans seen
+so far grouped under the same ``trace_id``; ``ON CONFLICT DO UPDATE`` lets the
+trace-level fields converge to the values carried by the batch that contains the
+Root_Span (correct route, full duration, final status) instead of failing the
+second write and discarding the rest of the trace."""
 
 INSERT_SPAN_SQL = """
     INSERT INTO spans (
@@ -95,9 +107,12 @@ INSERT_SPAN_SQL = """
         start_ts, duration_ms, status, attributes
     )
     VALUES (%s, %s, %s, %s, %s::timestamptz, %s, %s, %s::jsonb)
+    ON CONFLICT (trace_id, span_id) DO NOTHING
 """
 """Insert a single ``spans`` row; ``attributes`` is passed as a JSON string and
-cast to ``jsonb`` so the store does not depend on a psycopg JSON adapter (R5.3)."""
+cast to ``jsonb`` so the store does not depend on a psycopg JSON adapter (R5.3).
+``ON CONFLICT DO NOTHING`` keeps span writes idempotent when a trace is persisted
+across multiple flush cycles."""
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +140,18 @@ SELECT_SPANS_SQL = f"""
 """
 """All spans for a trace, ordered by start timestamp then span_id, both ascending
 (R7.2); the Root_Span's ``parent_span_id`` is null (R7.5)."""
+
+SELECT_SPANS_FOR_TRACES_SQL = f"""
+    SELECT {_SPAN_COLUMNS}, trace_id
+    FROM spans
+    WHERE trace_id = ANY(%s)
+    ORDER BY trace_id ASC, start_ts ASC, span_id ASC
+"""
+"""All spans for a set of traces in one round trip, grouped by trace and ordered
+per trace by start timestamp then span_id (ascending), matching the per-trace
+ordering of :data:`SELECT_SPANS_SQL`. ``trace_id`` is appended as the final
+column so results can be grouped in Python, avoiding an N+1 query in
+:meth:`PostgresTraceStore.search_traces`."""
 
 
 # ---------------------------------------------------------------------------
@@ -380,12 +407,29 @@ class PostgresTraceStore:
             with conn.cursor() as cur:
                 cur.execute(sql, tuple(params))
                 trace_rows = cur.fetchall()
-                traces: list[Trace] = []
-                for trace_row in trace_rows:
-                    cur.execute(SELECT_SPANS_SQL, (trace_row[0],))
-                    spans = [self._row_to_span(row) for row in cur.fetchall()]
-                    traces.append(self._row_to_trace(trace_row, spans))
-        return traces
+                if not trace_rows:
+                    return []
+
+                # Fetch every span for the matched traces in a single round
+                # trip and group them in Python. Issuing one span query per
+                # trace (N+1) is catastrophic against a remote database: a
+                # 200-row result becomes 201 sequential round trips.
+                trace_ids = [row[0] for row in trace_rows]
+                cur.execute(SELECT_SPANS_FOR_TRACES_SQL, (trace_ids,))
+                spans_by_trace: dict[str, list[Span]] = {}
+                for span_row in cur.fetchall():
+                    # trace_id is appended as the final selected column; strip
+                    # it before reconstructing the Span (which expects exactly
+                    # the _SPAN_COLUMNS in order).
+                    span_trace_id = span_row[-1]
+                    spans_by_trace.setdefault(span_trace_id, []).append(
+                        self._row_to_span(span_row[:-1])
+                    )
+
+        return [
+            self._row_to_trace(trace_row, spans_by_trace.get(trace_row[0], []))
+            for trace_row in trace_rows
+        ]
 
     # -- row reconstruction -------------------------------------------------
 

@@ -1,0 +1,62 @@
+.composer {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg, var(--radius));
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  transition: all var(--motion-fast) var(--easing);
+  box-shadow: var(--shadow-elevated);
+}
+.composer:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow), var(--shadow-elevated);
+}
+
+.textarea {
+  border: none;
+  background: transparent;
+  padding: var(--space-2);
+  min-height: 48px;
+  max-height: 152px;
+  font-size: 15px;
+  line-height: 1.5;
+}
+.textarea:focus {
+  outline: none;
+  border: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.sqlToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.sqlToggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}

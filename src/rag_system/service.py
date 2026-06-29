@@ -5,7 +5,7 @@ import time
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 
 from rag_system.chunking import DocumentChunker
 from rag_system.config import Settings
@@ -22,8 +22,14 @@ from rag_system.models import (
     QueryTraceRecord,
     RetrievalHit,
 )
-from rag_system.observability import get_logger, get_trace_id, metrics, timed
-from rag_system.observability_tracing import get_active_trace_id
+from rag_system.observability import (
+    get_logger,
+    get_trace_id,
+    is_unified_active,
+    metrics,
+    timed,
+)
+from rag_system.observability_tracing import get_active_trace_id, record_query_summary
 from rag_system.parsing import DocumentParserRouter
 from rag_system.queue import IngestionJob, SqsIngestionQueue
 from rag_system.rerank import BedrockCohereReranker
@@ -247,6 +253,7 @@ class RagService:
                     span,
                     document_id=document_id if document_id is not None else None,
                     document_version=version if version is not None else None,
+                    source_filename=filename,
                 )
             self._store.put_json(parsed_key(document_id, version), parsed.model_dump())
 
@@ -259,6 +266,7 @@ class RagService:
                     span,
                     document_id=document_id if document_id is not None else None,
                     document_version=version if version is not None else None,
+                    source_filename=filename,
                 )
             logger.info(
                 "Produced %d chunks",
@@ -276,6 +284,7 @@ class RagService:
                     span,
                     document_id=document_id if document_id is not None else None,
                     document_version=version if version is not None else None,
+                    source_filename=filename,
                 )
 
             if self._settings.sparse_enabled:
@@ -291,6 +300,7 @@ class RagService:
                     span,
                     document_id=document_id if document_id is not None else None,
                     document_version=version if version is not None else None,
+                    source_filename=filename,
                 )
 
             self._store.put_json(
@@ -332,12 +342,24 @@ class RagService:
             raise
 
     def get_document(self, document_id: str) -> DocumentRecord | None:
-        if record := self._documents.get(document_id):
-            return record
+        # Only trust the in-memory cache for records in a TERMINAL state. While a
+        # document is still being ingested, its canonical record is owned by the
+        # ingestion worker (a separate process) which advances the status in the
+        # shared store. Serving the cached non-terminal copy here would report a
+        # stale status forever (e.g. "queued" even after ingestion finished),
+        # because this process's cache is never notified of the worker's writes.
+        cached = self._documents.get(document_id)
+        if cached is not None and cached.status in (
+            DocumentStatus.indexed,
+            DocumentStatus.failed,
+            DocumentStatus.deleted,
+        ):
+            return cached
 
         payload = self._store.get_json(document_record_key(document_id))
         if payload is None:
-            return None
+            # No canonical record in the store; fall back to any cached copy.
+            return cached
 
         record = DocumentRecord.model_validate(payload)
         self._documents[document_id] = record
@@ -468,8 +490,83 @@ class RagService:
             latency_ms=latency_ms,
         )
         self._observe_answer_quality(response, top_hits, retrieval_mode, log_extra)
+        # Record the per-request query summary (question, confidence, tokens) on
+        # the trace — unless the unified router owns the summary for this request.
+        if not is_unified_active():
+            record_query_summary(request.question, response.confidence_score)
         logger.info("Query complete (trace=%s)", trace_id, extra=log_extra)
         return response
+
+    def query_stream(self, request: QueryRequest) -> Iterator[dict[str, Any]]:
+        """Stream a RAG answer.
+
+        Runs the (non-streamable) retrieval pipeline first, emitting status
+        events, then streams the grounded answer tokens, and finally persists
+        the trace and emits the structured ``QueryResponse``.
+        """
+        trace_id = get_trace_id() or str(uuid.uuid4())
+        query_start = time.perf_counter()
+        retrieval_mode = "hybrid" if self._settings.sparse_enabled else "dense"
+        log_extra: dict[str, Any] = {
+            "trace_id": trace_id,
+            "query_len": len(request.question),
+            "retrieval_mode": retrieval_mode,
+        }
+        logger.info("Processing query (streaming, trace=%s)", trace_id, extra=log_extra)
+        metrics.increment("rag_queries_total", {"mode": retrieval_mode})
+
+        yield {"type": "status", "stage": "retrieving"}
+        with timed(logger, "query embedding (dense)", **log_extra):
+            query_vector = self.embedder.embed_query(request.question)
+        if self._settings.sparse_enabled:
+            with timed(logger, "query encoding (sparse/BM25)", **log_extra):
+                sparse_query = self.sparse_encoder.encode_query(request.question)
+        else:
+            sparse_query = None
+
+        retrieval_operation = (
+            "hybrid retrieval (dense+sparse)"
+            if self._settings.sparse_enabled
+            else "dense retrieval"
+        )
+        with timed(logger, retrieval_operation, **log_extra):
+            hits = self.index.search(
+                query_vector=query_vector,
+                sparse_vector=sparse_query,
+                top_k=self._settings.retrieval_dense_top_k,
+                document_ids=request.document_ids,
+            )
+        self._observe_retrieval_quality(hits, retrieval_mode, log_extra)
+
+        reranker = self.reranker
+        if reranker:
+            with timed(logger, "reranking", **log_extra):
+                top_hits = reranker.rerank(request.question, hits)
+        else:
+            top_hits = hits[: self._settings.rerank_top_k]
+
+        yield {"type": "status", "stage": "generating"}
+        response: QueryResponse | None = None
+        for event in self.generator.answer_stream(request.question, top_hits, trace_id):
+            if event.get("type") == "final":
+                response = event["response"]
+            else:
+                yield event
+
+        assert response is not None  # answer_stream always yields a final event
+        latency_ms = (time.perf_counter() - query_start) * 1000
+        self._persist_query_trace_async(
+            request=request,
+            response=response,
+            top_hits=top_hits,
+            retrieval_mode=retrieval_mode,
+            latency_ms=latency_ms,
+        )
+        self._observe_answer_quality(response, top_hits, retrieval_mode, log_extra)
+        if not is_unified_active():
+            record_query_summary(request.question, response.confidence_score)
+        logger.info("Query complete (streaming, trace=%s)", trace_id, extra=log_extra)
+        yield {"type": "final", "response": response}
 
     def _persist_query_trace_async(self, **kwargs: Any) -> None:
         """Write the query trace to S3 in a background daemon thread.
@@ -593,6 +690,7 @@ class RagService:
             answer=response.answer,
             evidence_status=response.evidence_status,
             confidence=response.confidence,
+            confidence_score=response.confidence_score,
             insufficient_evidence_reason=response.insufficient_evidence_reason,
             citations=response.citations,
             retrieved_hits=[_trace_hit(hit) for hit in top_hits],

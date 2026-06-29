@@ -1,7 +1,8 @@
 import asyncio
+import logging
 import uuid
 
-from rag_system.config import get_settings
+from rag_system.config import Settings, get_settings
 from rag_system.observability import (
     get_logger,
     metrics,
@@ -14,6 +15,14 @@ from rag_system.queue import ReceivedIngestionJob, SqsIngestionQueue
 from rag_system.service import RagService
 
 logger = get_logger(__name__)
+
+#: Seconds to wait after a failed poll cycle before retrying, so a transient
+#: queue/network error backs off instead of spinning in a tight loop.
+ERROR_BACKOFF_SECONDS = 5.0
+
+#: Seconds to pause when a poll returned no messages, guarding against a hot
+#: loop if the queue is configured with a short/zero long-poll wait.
+IDLE_SLEEP_SECONDS = 1.0
 
 
 class IngestionWorker:
@@ -34,7 +43,19 @@ class IngestionWorker:
     async def run_forever(self) -> None:
         logger.info("Ingestion worker started")
         while True:
-            await self.process_once()
+            try:
+                processed = await self.process_once()
+            except Exception:
+                # A poll/receive failure must never kill the worker loop — log it
+                # and back off, then keep polling. Previously an exception here
+                # propagated out of run_forever and silently stopped ingestion.
+                logger.exception(
+                    "Ingestion poll cycle failed; backing off before retry"
+                )
+                await asyncio.sleep(ERROR_BACKOFF_SECONDS)
+                continue
+            if processed == 0:
+                await asyncio.sleep(IDLE_SLEEP_SECONDS)
 
     async def _process_message(self, message: ReceivedIngestionJob) -> None:
         job = message.job
@@ -68,9 +89,65 @@ class IngestionWorker:
             reset_trace_id(token)
 
 
+def _start_worker_observability(settings: Settings) -> None:
+    """Wire trace/log persistence in the worker process (mirrors the API).
+
+    The ingestion worker emits a Root_Span per job and one child span per stage
+    (parsing, chunking, embedding, indexing), but those spans — and the worker's
+    structured logs — are only persisted if the background flush workers and the
+    log handler run in *this* process. The API process wires its own; without
+    this, ingestion traces/logs never reach the store even though they are
+    captured. Failures here must not stop ingestion, so everything is best-effort.
+    """
+    if not settings.tracing_enabled:
+        return
+
+    # Import lazily to keep the worker independent of the FastAPI app module.
+    from rag_system.observability_tracing import schema
+    from rag_system.observability_tracing.buffers import BoundedLogBuffer
+    from rag_system.observability_tracing.flush_workers import (
+        LogFlushWorker,
+        TraceFlushWorker,
+    )
+    from rag_system.observability_tracing.log_handler import TracePersistingLogHandler
+    from rag_system.observability_tracing.log_store import PostgresLogStore
+    from rag_system.observability_tracing.trace_store import PostgresTraceStore
+
+    try:
+        schema.apply_schema(settings)
+    except Exception:  # noqa: BLE001 - never let observability setup stop ingestion
+        logger.exception(
+            "Failed to apply observability schema in worker; ingestion traces/logs "
+            "will not persist until the database is reachable. Ingestion itself is "
+            "unaffected."
+        )
+        return
+
+    try:
+        recorder = get_span_recorder()
+
+        log_buffer = BoundedLogBuffer(
+            capacity=settings.log_buffer_capacity, metrics=metrics
+        )
+        logging.getLogger().addHandler(TracePersistingLogHandler(log_buffer))
+
+        TraceFlushWorker(
+            span_buffer=recorder._span_buffer,
+            trace_store=PostgresTraceStore(settings),
+        ).start()
+        LogFlushWorker(
+            log_buffer=log_buffer,
+            log_store=PostgresLogStore(settings),
+        ).start()
+        logger.info("Worker observability started (trace + log flush workers)")
+    except Exception:  # noqa: BLE001 - best-effort; ingestion must still run
+        logger.exception("Failed to start worker observability; continuing without it")
+
+
 async def amain() -> None:
     setup_logging()
     settings = get_settings()
+    _start_worker_observability(settings)
     service = RagService(settings)
     await IngestionWorker(service, service.queue).run_forever()
 

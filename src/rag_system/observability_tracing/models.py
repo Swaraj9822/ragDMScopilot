@@ -39,6 +39,14 @@ class Span:
     duration_ms: int                      # non-negative integer (R1.4, R4.3)
     status: SpanStatus
     attributes: dict[str, AttributeValue] = field(default_factory=dict)
+    # Identity of the owning trace, stamped by the recorder so the off-path
+    # flush worker can group buffered spans by trace without external context
+    # (see group_spans_by_trace). Not part of the stored span row (the trace_id
+    # lives on the trace), so the serializer ignores it.
+    trace_id: str | None = None
+    # Route label, set only on the Root_Span so the flush worker can derive the
+    # trace's route from its root. Ignored by the span serializer.
+    route: str | None = None
 
 
 @dataclass

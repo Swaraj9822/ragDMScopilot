@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 import boto3
 import boto3.session
@@ -79,6 +80,32 @@ class Settings(BaseSettings):
         default=10_000,
         alias="COPILOT_STATEMENT_TIMEOUT_MS",
     )
+
+    # --- Hybrid synthesis ---
+    # The hybrid route runs RAG and the database copilot, then optionally makes
+    # one more LLM call to merge the two answers (~3s on the critical path).
+    # "auto"   — synthesize only when the two answers share enough vocabulary to
+    #            actually overlap; otherwise present them as labeled sections.
+    # "always" — always make the merge call (previous behaviour).
+    # "never"  — never merge; always present labeled sections.
+    hybrid_synthesis_mode: Literal["auto", "always", "never"] = Field(
+        default="auto", alias="RAG_HYBRID_SYNTHESIS_MODE"
+    )
+    # Overlap coefficient (shared significant tokens / smaller token set) at or
+    # above which "auto" mode treats the two answers as overlapping.
+    hybrid_overlap_threshold: float = Field(
+        default=0.12, alias="RAG_HYBRID_OVERLAP_THRESHOLD"
+    )
+
+    @field_validator("hybrid_overlap_threshold")
+    @classmethod
+    def _validate_overlap_threshold(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            raise ValueError(
+                f"invalid hybrid overlap threshold {value!r}: must be within "
+                "the inclusive range [0.0, 1.0]"
+            )
+        return value
 
     # AWS client tuning. Bedrock/S3 latency from some environments is erratic;
     # explicit timeouts + adaptive retries fail fast and back off on throttling
