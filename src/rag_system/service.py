@@ -369,6 +369,18 @@ class RagService:
         )
         return record
 
+    def list_documents(self) -> list[DocumentRecord]:
+        """Return all document records ordered by title ascending."""
+        records: list[DocumentRecord] = []
+        for key in self._store.list_document_record_keys():
+            document_id = key[len("documents/") : key.rfind("/record.json")]
+            record = self.get_document(document_id)
+            if record is not None:
+                records.append(record)
+        records.sort(key=lambda r: r.title.lower())
+        logger.info("Listed %d documents", len(records))
+        return records
+
     def _save_document_record(self, record: DocumentRecord) -> None:
         self._documents[record.id] = record
         key = document_record_key(record.id)

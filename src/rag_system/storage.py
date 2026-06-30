@@ -103,6 +103,18 @@ class S3ArtifactStore:
         self._client.put_object(**kwargs)
         logger.debug("S3 put complete: %s (%d bytes)", key, len(content), extra={"s3_key": key})
 
+    def list_document_record_keys(self) -> list[str]:
+        """Return the S3 keys of all persisted document records."""
+        keys: list[str] = []
+        prefix = "documents/"
+        paginator = self._client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj.get("Key", "")
+                if key.endswith("/record.json"):
+                    keys.append(key)
+        return keys
+
 
 def raw_document_key(document_id: str, version: str, filename: str) -> str:
     """Return the S3 key for a raw uploaded document, preserving original extension."""

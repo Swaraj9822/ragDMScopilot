@@ -1,0 +1,335 @@
+{
+  "id": "019f14cb-cb57-7068-9f19-2fd207b7ed4c",
+  "name": "RAG Console Frontend",
+  "description": "Build a production-ready enterprise web frontend for the Production RAG backend, exposing Copilot Q&A, AI Observability traces/logs, and Document ingestion/management in a unified single-page application that matches the PRODUCT.md design principles.",
+  "status": "paused",
+  "worktree": {
+    "path": "/mnt/c/aaaa",
+    "branch": "frontadd",
+    "commit": "23b8494161d74490a60a6a136f8c0a5dc1691bee"
+  },
+  "scoping": {
+    "goal": {
+      "answer": "Build a production-ready enterprise web frontend for the Production RAG backend that exposes all three product tabs — Copilot Q&A, AI Observability traces/logs, and Document ingestion/management — in a unified single-page application matching the PRODUCT.md design principles.",
+      "confirmedAt": "2026-06-29T19:20:49.016Z"
+    },
+    "criteria": {
+      "answer": "Three-tab shell (Copilot, Observability, Documents) routes and renders without runtime errors\nCopilot supports streaming (/ask/stream) and non-streaming (/ask) queries and displays answer, route, evidence status, citations, SQL, and result rows\nObservability supports searching traces, viewing a trace waterfall/spans, and viewing correlated logs\nDocuments supports file upload, status tracking, version update, delete, and a document list\nBackend exposes a GET /documents list endpoint so the Documents tab can enumerate documents (only backend change required)\nFrontend meets WCAG 2.2 AA accessibility targets (keyboard navigation, visible focus, labelled inputs, aria-live)\nFrontend builds successfully and passes type checking, lint, and smoke tests\nBackend CORS already permits frontend origin (http://localhost:3000)",
+      "confirmedAt": "2026-06-29T19:20:49.016Z"
+    },
+    "constraints": {
+      "answer": "Frontend stack: Vite + React 18+ + TypeScript + TanStack Router + TanStack Query + Tailwind CSS + shadcn/ui, Single-user internal tool; do not build auth, billing, or notification surfaces, Backend changes are limited to adding a GET /documents list endpoint; no other backend refactoring, Design must follow PRODUCT.md principles: honest states, evidence-first, teal signal, dense readable data, All UI text/data must come from real backend responses; no fabricated metrics or progress",
+      "confirmedAt": "2026-06-29T19:20:49.016Z"
+    },
+    "phases": {
+      "answer": "Design & spec, Scaffold & core, Copilot tab, Observability tab, Documents tab, Integration & polish, Final verification",
+      "confirmedAt": "2026-06-29T19:20:49.016Z"
+    },
+    "assumptions": {
+      "answer": "Backend API runs at http://localhost:8000; Frontend dev server runs at http://localhost:3000 (CORS already allowed in api.py); Node.js and pnpm (or npm) are available in the environment; The user will review and approve the design spec before implementation begins; Document records are persisted in the backend and can be listed by adding a GET /documents endpoint",
+      "confirmedAt": "2026-06-29T19:20:49.016Z"
+    }
+  },
+  "phases": [
+    {
+      "id": "phase-1",
+      "index": 1,
+      "name": "Design & spec",
+      "goal": "Confirm architecture, write approved design spec",
+      "description": "",
+      "parallel": false,
+      "status": "completed",
+      "steps": [
+        {
+          "id": "step-1",
+          "index": 1,
+          "description": "Write design spec with stack rationale, component architecture, data flow, accessibility plan, and API mappings",
+          "status": "verified",
+          "verification": {
+            "command": "test -f docs/superpowers/specs/2026-06-29-rag-console-frontend-design.md",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false,
+          "startedAt": "2026-06-29T19:24:13.615Z",
+          "completedAt": "2026-06-29T19:28:48.341Z",
+          "result": {
+            "success": true,
+            "exitCode": 0,
+            "stdout": "",
+            "stderr": "",
+            "completedAt": "2026-06-29T19:28:48.341Z"
+          }
+        }
+      ],
+      "startedAt": "2026-06-29T19:23:41.117Z",
+      "completedAt": "2026-06-29T19:30:56.708Z",
+      "summary": "Phase 1 complete: the RAG Console Frontend design spec has been written and verified at docs/superpowers/specs/2026-06-29-rag-console-frontend-design.md (217 lines). It covers architecture, stack rationale, project structure, data flow, API mappings, component design per tab, accessibility, error/loading/empty states, testing strategy, required backend change, and open questions.",
+      "grade": {
+        "grade": "A",
+        "rationale": "All gates pass; project checks validate.",
+        "gradedAt": "2026-06-29T19:30:56.684Z"
+      }
+    },
+    {
+      "id": "phase-2",
+      "index": 2,
+      "name": "Scaffold & core",
+      "goal": "Create the frontend project shell, API client, theme tokens, and layout",
+      "description": "",
+      "parallel": false,
+      "status": "active",
+      "steps": [
+        {
+          "id": "step-1",
+          "index": 1,
+          "description": "Scaffold Vite + React + TypeScript project and configure Tailwind, shadcn/ui, TanStack Router, TanStack Query, and lint/test tooling",
+          "status": "verified",
+          "verification": {
+            "command": "pnpm build",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false,
+          "startedAt": "2026-06-29T20:29:26.003Z",
+          "completedAt": "2026-06-29T20:35:50.752Z",
+          "result": {
+            "success": true,
+            "exitCode": 0,
+            "stdout": "",
+            "stderr": "",
+            "completedAt": "2026-06-29T20:35:50.752Z"
+          }
+        },
+        {
+          "id": "step-2",
+          "index": 2,
+          "description": "Implement type-safe API client for backend endpoints and SSE streaming parser",
+          "status": "pending",
+          "verification": {
+            "command": "pnpm test src/api",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false,
+          "startedAt": "2026-06-29T20:38:10.841Z"
+        },
+        {
+          "id": "step-3",
+          "index": 3,
+          "description": "Implement design system, theme tokens, and accessible layout shell with three-tab navigation",
+          "status": "pending",
+          "verification": {
+            "command": "pnpm test src/components",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false
+        }
+      ],
+      "startedAt": "2026-06-29T19:32:41.917Z"
+    },
+    {
+      "id": "phase-3",
+      "index": 3,
+      "name": "Copilot tab",
+      "goal": "Implement the grounded Q&A interface",
+      "description": "",
+      "parallel": true,
+      "groupIndex": 1,
+      "status": "planned",
+      "steps": [
+        {
+          "id": "step-1",
+          "index": 1,
+          "description": "Build chat input, message list, route badge, evidence status, and citation cards",
+          "status": "pending",
+          "verification": {
+            "command": "pnpm test src/copilot",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false
+        },
+        {
+          "id": "step-2",
+          "index": 2,
+          "description": "Integrate /ask/stream SSE endpoint with meta/status/delta/final events and non-streaming fallback",
+          "status": "pending",
+          "verification": {
+            "command": "pnpm test src/copilot",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false
+        }
+      ]
+    },
+    {
+      "id": "phase-4",
+      "index": 4,
+      "name": "Observability tab",
+      "goal": "Implement trace search and trace/log inspection",
+      "description": "",
+      "parallel": true,
+      "groupIndex": 1,
+      "status": "planned",
+      "steps": [
+        {
+          "id": "step-1",
+          "index": 1,
+          "description": "Build trace search filters and result table with pagination",
+          "status": "pending",
+          "verification": {
+            "command": "pnpm test src/observability",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false
+        },
+        {
+          "id": "step-2",
+          "index": 2,
+          "description": "Build trace waterfall/spans view and correlated logs panel",
+          "status": "pending",
+          "verification": {
+            "command": "pnpm test src/observability",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false
+        }
+      ]
+    },
+    {
+      "id": "phase-5",
+      "index": 5,
+      "name": "Documents tab",
+      "goal": "Implement document upload, list, and lifecycle actions",
+      "description": "",
+      "parallel": true,
+      "groupIndex": 1,
+      "status": "planned",
+      "steps": [
+        {
+          "id": "step-1",
+          "index": 1,
+          "description": "Add GET /documents list endpoint to backend and implement document list with status, update, delete",
+          "status": "pending",
+          "verification": {
+            "command": "pytest tests/test_service_document_records.py -v",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false
+        },
+        {
+          "id": "step-2",
+          "index": 2,
+          "description": "Build upload dropzone with progress, status display, and async polling",
+          "status": "pending",
+          "verification": {
+            "command": "pnpm test src/documents",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false
+        }
+      ]
+    },
+    {
+      "id": "phase-6",
+      "index": 6,
+      "name": "Integration & polish",
+      "goal": "Wire tabs together, add error handling, loading/empty/failure states, and accessibility",
+      "description": "",
+      "parallel": false,
+      "status": "planned",
+      "steps": [
+        {
+          "id": "step-1",
+          "index": 1,
+          "description": "Connect tabs to router, add global error boundaries, and polish responsive behavior",
+          "status": "pending",
+          "verification": {
+            "command": "pnpm test",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false
+        },
+        {
+          "id": "step-2",
+          "index": 2,
+          "description": "Run accessibility checks and verify keyboard navigation and aria-live announcements",
+          "status": "pending",
+          "verification": {
+            "command": "pnpm test && pnpm lint",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false
+        }
+      ]
+    },
+    {
+      "id": "phase-7",
+      "index": 7,
+      "name": "Final verification",
+      "goal": "Confirm production build and document usage",
+      "description": "",
+      "parallel": false,
+      "status": "planned",
+      "steps": [
+        {
+          "id": "step-1",
+          "index": 1,
+          "description": "Run production build and end-to-end smoke test against running backend",
+          "status": "pending",
+          "verification": {
+            "command": "pnpm build && pnpm test",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false
+        },
+        {
+          "id": "step-2",
+          "index": 2,
+          "description": "Write README with run instructions and architecture notes",
+          "status": "pending",
+          "verification": {
+            "command": "test -f frontend/README.md",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false
+        }
+      ]
+    }
+  ],
+  "decisions": [],
+  "memories": [],
+  "createdAt": "2026-06-29T19:12:08.023Z",
+  "updatedAt": "2026-06-29T21:04:02.587Z",
+  "goal": "Build a production-ready enterprise web frontend for the Production RAG backend that exposes all three product tabs — Copilot Q&A, AI Observability traces/logs, and Document ingestion/management — in a unified single-page application matching the PRODUCT.md design principles.",
+  "successCriteria": [
+    "Three-tab shell (Copilot, Observability, Documents) routes and renders without runtime errors",
+    "Copilot supports streaming (/ask/stream) and non-streaming (/ask) queries and displays answer, route, evidence status, citations, SQL, and result rows",
+    "Observability supports searching traces, viewing a trace waterfall/spans, and viewing correlated logs",
+    "Documents supports file upload, status tracking, version update, delete, and a document list",
+    "Backend exposes a GET /documents list endpoint so the Documents tab can enumerate documents (only backend change required)",
+    "Frontend meets WCAG 2.2 AA accessibility targets (keyboard navigation, visible focus, labelled inputs, aria-live)",
+    "Frontend builds successfully and passes type checking, lint, and smoke tests",
+    "Backend CORS already permits frontend origin (http://localhost:3000)"
+  ],
+  "constraints": [
+    "Frontend stack: Vite + React 18+ + TypeScript + TanStack Router + TanStack Query + Tailwind CSS + shadcn/ui",
+    "Single-user internal tool; do not build auth, billing, or notification surfaces",
+    "Backend changes are limited to adding a GET /documents list endpoint; no other backend refactoring",
+    "Design must follow PRODUCT.md principles: honest states, evidence-first, teal signal, dense readable data",
+    "All UI text/data must come from real backend responses; no fabricated metrics or progress"
+  ],
+  "lastActiveAt": "2026-06-29T19:32:41.917Z",
+  "activePhaseId": "phase-2"
+}

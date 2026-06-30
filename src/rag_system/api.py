@@ -59,7 +59,7 @@ app = FastAPI(title="Production RAG", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -440,6 +440,12 @@ def get_document(document_id: str) -> DocumentRecord:
     if not record:
         raise HTTPException(status_code=404, detail="Document not found.")
     return record
+
+
+@app.get("/documents", response_model=list[DocumentRecord])
+def list_documents() -> list[DocumentRecord]:
+    """List all uploaded documents."""
+    return get_service().list_documents()
 
 
 @app.post("/ask", response_model=UnifiedQueryResponse)
