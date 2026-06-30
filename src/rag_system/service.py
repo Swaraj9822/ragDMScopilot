@@ -1,9 +1,9 @@
 import contextvars
 import hashlib
-import threading
 import time
 import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -46,6 +46,16 @@ from rag_system.storage import (
 )
 
 logger = get_logger(__name__)
+
+
+# Bounded pool for best-effort, off-request-path query-trace persistence. A
+# fixed worker count caps concurrent background writes instead of spawning one
+# unbounded thread per query under load; trace writes are short S3 puts, so a
+# small pool drains them quickly. Threads are daemon so they never hold up
+# process exit beyond a brief drain.
+_TRACE_PERSIST_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="trace-writer"
+)
 
 
 class RagService:
@@ -581,11 +591,14 @@ class RagService:
         yield {"type": "final", "response": response}
 
     def _persist_query_trace_async(self, **kwargs: Any) -> None:
-        """Write the query trace to S3 in a background daemon thread.
+        """Write the query trace to S3 on a bounded background pool.
 
         Trace persistence is best-effort observability, so a slow or failing
         S3 write never blocks or fails the user-facing query. The request's
-        trace-id context is copied so background logs stay correlated.
+        trace-id context is copied so background logs stay correlated. The work
+        runs on a shared, size-bounded executor rather than a freshly spawned
+        thread, so a burst of queries cannot create an unbounded number of
+        threads.
         """
         ctx = contextvars.copy_context()
 
@@ -597,7 +610,12 @@ class RagService:
                     "Background query-trace persistence failed", exc_info=True
                 )
 
-        threading.Thread(target=_run_logged, name="trace-writer", daemon=True).start()
+        try:
+            _TRACE_PERSIST_EXECUTOR.submit(_run_logged)
+        except RuntimeError:
+            # Executor already shut down (e.g. during interpreter teardown) —
+            # fall back to an inline best-effort write so the trace is not lost.
+            _run_logged()
 
     def _observe_retrieval_quality(
         self,

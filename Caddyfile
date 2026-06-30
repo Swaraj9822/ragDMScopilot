@@ -1,0 +1,12 @@
+# Caddy automatically obtains and renews a Let's Encrypt certificate for this
+# hostname and redirects HTTP -> HTTPS. The hostname is a free wildcard-DNS name
+# (nip.io) that resolves to the VM's static IP 34.139.146.167.
+#
+# To switch to a real custom domain later: replace the hostname below with your
+# domain (after pointing its DNS A record at 34.139.146.167), then
+#   docker compose restart caddy
+34.139.146.167.nip.io {
+	# Forward everything to the existing nginx container (SPA + /api proxy).
+	# Caddy streams Server-Sent Events (/api/ask/stream) correctly by default.
+	reverse_proxy web:80
+}

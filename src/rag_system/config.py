@@ -168,6 +168,101 @@ class Settings(BaseSettings):
             )
         return value
 
+    # --- Authentication (self-managed JWT) ---
+    # When auth is enabled every endpoint except the public ones (/, /health,
+    # /metrics, /docs, and /auth/*) requires a valid bearer token. Disable it
+    # (RAG_AUTH_ENABLED=false) only for trusted local/single-user setups.
+    auth_enabled: bool = Field(default=True, alias="RAG_AUTH_ENABLED")
+    # Open self-service registration. When False (default), /auth/register is
+    # closed once at least one account exists — the first registration is still
+    # allowed so an initial operator can bootstrap, then the endpoint locks down
+    # and further accounts must be provisioned deliberately (flip this to True).
+    # This keeps an internal single-user tool from accepting arbitrary signups.
+    auth_allow_registration: bool = Field(
+        default=False, alias="RAG_AUTH_ALLOW_REGISTRATION"
+    )
+    # Per-client rate limiting for abuse-prone auth endpoints (login, register,
+    # refresh). In-process/per-replica only; front with a shared limiter for
+    # multi-instance deployments. Set the per-minute allowance to 0 to disable.
+    auth_rate_limit_per_minute: int = Field(
+        default=10, alias="RAG_AUTH_RATE_LIMIT_PER_MINUTE"
+    )
+
+    @field_validator("auth_rate_limit_per_minute")
+    @classmethod
+    def _validate_auth_rate_limit(cls, value: int) -> int:
+        if value < 0 or value > 10_000:
+            raise ValueError(
+                f"invalid auth rate limit {value!r} per minute: must be within "
+                "0 (disabled) and 10000 inclusive"
+            )
+        return value
+    # Comma-separated list of browser origins allowed to make credentialed
+    # cross-origin requests. A wildcard is intentionally NOT the default:
+    # browsers reject "*" together with credentials, and an open wildcard lets
+    # any site call the API with the user's cookies/authorization. Defaults to
+    # the local RAG Console dev origin; set RAG_CORS_ALLOW_ORIGINS to the real
+    # console URL(s) in production.
+    cors_allow_origins: str = Field(
+        default="http://localhost:3000", alias="RAG_CORS_ALLOW_ORIGINS"
+    )
+
+    @property
+    def cors_allow_origins_list(self) -> list[str]:
+        """Parsed, de-duplicated list of allowed CORS origins."""
+        seen: list[str] = []
+        for origin in self.cors_allow_origins.split(","):
+            origin = origin.strip().rstrip("/")
+            if origin and origin not in seen:
+                seen.append(origin)
+        return seen
+    # HMAC signing secret for HS256 tokens. Required when auth is enabled; the
+    # application refuses to start without it so tokens are never signed with a
+    # predictable key. Generate one with: python -c "import secrets; print(secrets.token_urlsafe(48))"
+    jwt_secret_key: str | None = Field(default=None, alias="RAG_JWT_SECRET_KEY")
+    jwt_algorithm: str = Field(default="HS256", alias="RAG_JWT_ALGORITHM")
+    jwt_issuer: str = Field(default="production-rag", alias="RAG_JWT_ISSUER")
+    access_token_ttl_minutes: int = Field(
+        default=60, alias="RAG_ACCESS_TOKEN_TTL_MINUTES"
+    )
+    refresh_token_ttl_days: int = Field(
+        default=30, alias="RAG_REFRESH_TOKEN_TTL_DAYS"
+    )
+
+    @field_validator("access_token_ttl_minutes")
+    @classmethod
+    def _validate_access_token_ttl(cls, value: int) -> int:
+        if value < 1 or value > 7 * 24 * 60:  # 1 minute .. 7 days
+            raise ValueError(
+                f"invalid access token TTL {value!r} minutes: must be within "
+                "1 minute and 7 days (10080 minutes) inclusive"
+            )
+        return value
+
+    @field_validator("refresh_token_ttl_days")
+    @classmethod
+    def _validate_refresh_token_ttl(cls, value: int) -> int:
+        if value < 1 or value > 365:  # 1 day .. 1 year
+            raise ValueError(
+                f"invalid refresh token TTL {value!r} days: must be within "
+                "1 day and 365 days inclusive"
+            )
+        return value
+
+    def require_jwt_secret(self) -> str:
+        """Return the configured JWT secret or raise when auth is misconfigured.
+
+        Centralises the "auth enabled but no secret set" failure so it surfaces
+        with a clear, actionable message wherever a token is signed or verified.
+        """
+        if not self.jwt_secret_key:
+            raise RuntimeError(
+                "Authentication is enabled but RAG_JWT_SECRET_KEY is not set. "
+                "Generate one with: "
+                'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+            )
+        return self.jwt_secret_key
+
     def boto3_session(self) -> boto3.session.Session:
         """Return a boto3 Session pre-loaded with credentials from .env.
 

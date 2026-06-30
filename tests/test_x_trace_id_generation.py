@@ -23,12 +23,11 @@ from fastapi.testclient import TestClient
 
 from rag_system import api as api_module
 
-#: The middleware generates trace_ids via str(uuid.uuid4()) which produces a
-#: hyphenated UUID4 string. Once hyphens are stripped it yields 32 lowercase
-#: hex characters.
-_UUID4_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-)
+#: The middleware generates trace_ids via uuid.uuid4().hex, which produces a
+#: 32-character lowercase hexadecimal string (no hyphens). This matches the
+#: trace-id format the observability endpoints validate against
+#: (rag_system.api._TRACE_ID_RE).
+_UUID4_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _client() -> TestClient:
@@ -58,14 +57,12 @@ def test_generated_trace_id_is_valid_uuid4_hex() -> None:
     response = client.get("/health")
 
     trace_id = response.headers["x-trace-id"]
-    # str(uuid.uuid4()) produces a hyphenated UUID4 whose hex content is 32 chars
+    # uuid.uuid4().hex is a 32-character lowercase hex string with no hyphens.
     assert _UUID4_RE.fullmatch(trace_id), (
-        f"Generated trace_id '{trace_id}' does not match expected UUID4 format"
+        f"Generated trace_id '{trace_id}' does not match expected 32-char hex format"
     )
-    # Stripping hyphens yields exactly 32 lowercase hex characters
-    hex_only = trace_id.replace("-", "")
-    assert len(hex_only) == 32
-    assert all(c in "0123456789abcdef" for c in hex_only)
+    assert len(trace_id) == 32
+    assert all(c in "0123456789abcdef" for c in trace_id)
 
 
 # -- 3. Multiple requests get different trace_ids (uniqueness) ---------------

@@ -261,9 +261,10 @@ class TestStartObservabilityPlatform:
 
     @patch("rag_system.api.get_settings")
     def test_skipped_when_tracing_disabled(self, mock_get_settings):
-        """The startup event does not wire observability when tracing is disabled."""
+        """The lifespan does not wire observability when tracing is disabled."""
         mock_settings = MagicMock()
         mock_settings.tracing_enabled = False
+        mock_settings.auth_enabled = False
         mock_get_settings.return_value = mock_settings
 
         import rag_system.api as api_mod
@@ -271,5 +272,9 @@ class TestStartObservabilityPlatform:
         with patch.object(api_mod, "_start_observability_platform") as mock_start:
             import asyncio
 
-            asyncio.run(api_mod._on_startup())
+            async def _run() -> None:
+                async with api_mod.lifespan(api_mod.app):
+                    pass
+
+            asyncio.run(_run())
             mock_start.assert_not_called()

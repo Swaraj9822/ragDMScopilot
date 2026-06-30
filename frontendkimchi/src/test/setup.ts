@@ -2,11 +2,13 @@ import "@testing-library/jest-dom/vitest";
 import { afterAll, afterEach, beforeAll, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { server } from "./server";
+import { clearTokens } from "../api/tokenStore";
 
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 
 afterEach(() => {
   cleanup();
+  clearTokens();
   localStorage.clear();
   server.resetHandlers();
 });
@@ -26,6 +28,12 @@ if (!window.matchMedia) {
       removeEventListener: vi.fn(),
       dispatchEvent: vi.fn(),
     }) as unknown as MediaQueryList;
+}
+
+// jsdom does not implement scrollIntoView; provide a no-op so components that
+// auto-scroll (e.g. the Copilot transcript) can mount in tests.
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = vi.fn();
 }
 
 // crypto.randomUUID for trace id generation.

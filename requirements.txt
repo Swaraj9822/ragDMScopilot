@@ -15,6 +15,10 @@ python-multipart>=0.0.9
 tenacity>=8.2.0
 uvicorn[standard]>=0.30.0
 
+# Authentication (self-managed JWT)
+bcrypt>=4.1.0
+pyjwt>=2.8.0
+
 
 # Development and tests
 pytest>=8.2.0

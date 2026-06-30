@@ -1,6 +1,8 @@
 // Typed fetch client. All network access funnels through here so page
 // components never call fetch directly.
 
+import { clearTokens, getAccessToken, getRefreshToken, setTokens } from "./tokenStore";
+
 export const API_BASE_URL: string =
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ??
   "http://localhost:8000";
@@ -70,6 +72,58 @@ interface RequestOptions {
   signal?: AbortSignal;
   /** Retry idempotent GET requests up to this many times. */
   retries?: number;
+  /** Skip attaching the bearer token / 401-refresh (used by the auth endpoints). */
+  skipAuth?: boolean;
+  /** Internal: set once a request has already been retried after a token refresh. */
+  _authRetried?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Token refresh (single-flight). Concurrent 401s share one refresh round-trip
+// so we never fire multiple /auth/refresh calls (which would rotate the refresh
+// token repeatedly and trip the backend's reuse detection).
+// ---------------------------------------------------------------------------
+
+let refreshPromise: Promise<boolean> | null = null;
+
+async function performRefresh(): Promise<boolean> {
+  const refresh = getRefreshToken();
+  if (!refresh) return false;
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ refresh_token: refresh }),
+    });
+  } catch {
+    // Network failure — leave the session intact so the user can retry later.
+    return false;
+  }
+  if (!response.ok) {
+    // The refresh token is invalid/expired/revoked: end the session so the app
+    // redirects to login (subscribers are notified by clearTokens).
+    clearTokens();
+    return false;
+  }
+  try {
+    const data = await response.json();
+    setTokens({ access: data.access_token, refresh: data.refresh_token });
+    return true;
+  } catch {
+    clearTokens();
+    return false;
+  }
+}
+
+/** Refresh the access token, coalescing concurrent callers into one request. */
+export function refreshAccessToken(): Promise<boolean> {
+  if (!refreshPromise) {
+    refreshPromise = performRefresh().finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
 }
 
 async function rawRequest(
@@ -99,6 +153,10 @@ async function rawRequest(
     ...headers,
   };
   if (traceId) finalHeaders["X-Trace-Id"] = traceId;
+  if (!options.skipAuth) {
+    const access = getAccessToken();
+    if (access) finalHeaders["Authorization"] = `Bearer ${access}`;
+  }
 
   try {
     return await fetch(`${API_BASE_URL}${path}`, {
@@ -137,6 +195,18 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     try {
       const response = await rawRequest(path, options);
       if (!response.ok) {
+        // Access token likely expired — refresh once and retry the request.
+        if (
+          response.status === 401 &&
+          !options.skipAuth &&
+          !options._authRetried &&
+          getRefreshToken()
+        ) {
+          const refreshed = await refreshAccessToken();
+          if (refreshed) {
+            return await request<T>(path, { ...options, _authRetried: true });
+          }
+        }
         const error = await parseError(response);
         if (retries > attempt && response.status >= 500 && (!options.method || options.method === "GET")) {
           attempt += 1;

@@ -1,4 +1,5 @@
-import { apiClient, API_BASE_URL, newTraceId, ApiError, NetworkError, TIMEOUT_LONG_MS } from "./client";
+import { apiClient, API_BASE_URL, newTraceId, ApiError, NetworkError, TIMEOUT_LONG_MS, refreshAccessToken } from "./client";
+import { getAccessToken } from "./tokenStore";
 import type { HealthResponse, UnifiedQueryRequest, UnifiedQueryResponse } from "./types";
 
 export function checkHealth(): Promise<HealthResponse> {
@@ -86,17 +87,21 @@ export async function askStream(
   const started = performance.now();
 
   let response: Response;
-  const doFetch = (withSignal: boolean) =>
-    fetch(`${API_BASE_URL}/ask/stream`, {
+  const doFetch = (withSignal: boolean) => {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      "X-Trace-Id": traceId,
+    };
+    const access = getAccessToken();
+    if (access) headers["Authorization"] = `Bearer ${access}`;
+    return fetch(`${API_BASE_URL}/ask/stream`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-        "X-Trace-Id": traceId,
-      },
+      headers,
       body: JSON.stringify(payload),
       ...(withSignal && params.signal ? { signal: params.signal } : {}),
     });
+  };
   try {
     response = await doFetch(true);
   } catch (err) {
@@ -107,6 +112,14 @@ export async function askStream(
       response = await doFetch(false);
     } else {
       throw new NetworkError((err as Error)?.message);
+    }
+  }
+
+  // Access token may have expired — refresh once and re-open the stream.
+  if (response.status === 401) {
+    const refreshed = await refreshAccessToken();
+    if (refreshed) {
+      response = await doFetch(true).catch(() => doFetch(false));
     }
   }
 

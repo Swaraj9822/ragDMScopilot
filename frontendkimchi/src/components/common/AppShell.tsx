@@ -3,6 +3,7 @@ import { PrimaryNav } from "./PrimaryNav";
 import { ConnectionStatus } from "./ConnectionStatus";
 import { ThemeToggle } from "./ThemeToggle";
 import { ToastRegion } from "./ToastRegion";
+import { UserMenu } from "./UserMenu";
 import styles from "./AppShell.module.css";
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -26,6 +27,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div className={styles.topbarRight}>
           <ConnectionStatus />
           <ThemeToggle />
+          <UserMenu />
         </div>
       </header>
       <PrimaryNav />

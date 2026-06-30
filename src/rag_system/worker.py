@@ -60,8 +60,12 @@ class IngestionWorker:
     async def _process_message(self, message: ReceivedIngestionJob) -> None:
         job = message.job
         # R2.9: adopt the payload trace_id when present; R2.10: generate a new
-        # one when absent. The recorder's start_trace handles generation when
-        # trace_id is None.
+        # one when absent. We set the resolved id on the logging context here,
+        # then pass job.trace_id (possibly None) to start_trace. When it is None
+        # the recorder falls back to the active context trace id (the value we
+        # just set), so logs and the Root_Span share the same id while the
+        # sampler still applies the configured rate (has_trace_header=False).
+        # A propagated, header-origin trace_id is force-sampled (R10.7).
         trace_id = job.trace_id or str(uuid.uuid4())
         token = set_trace_id(trace_id)
         try:
@@ -71,7 +75,7 @@ class IngestionWorker:
             )
             recorder = get_span_recorder()
             # R12.1: open a Root_Span representing this ingestion job.
-            # R2.9/R2.10: adopt payload trace_id or let the recorder generate one.
+            # R2.9/R2.10: adopt payload trace_id or fall back to the context id.
             with recorder.start_trace(
                 trace_id=job.trace_id, route="ingestion", is_root_http=False
             ):

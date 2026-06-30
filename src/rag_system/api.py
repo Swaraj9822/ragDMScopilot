@@ -5,13 +5,26 @@ import threading
 import time
 import uuid
 import json as _json
+from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import lru_cache
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
+from rag_system.auth import apply_schema as apply_auth_schema
+from rag_system.auth import get_current_user
+from rag_system.auth import router as auth_router
 from rag_system.config import get_settings
 from rag_system.copilot import DatabaseCopilotService, SqlValidationError
 from rag_system.observability_tracing import get_span_recorder
@@ -55,15 +68,53 @@ from rag_system.service import RagService
 setup_logging()
 logger = get_logger(__name__)
 
-app = FastAPI(title="Production RAG", version="0.1.0")
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan — set up auth, then wire observability if enabled.
+
+    Replaces the deprecated ``@app.on_event("startup")`` hook. Startup work runs
+    before ``yield``; nothing needs explicit teardown after it because the flush
+    workers and retention scheduler are daemon threads that stop with the
+    process.
+    """
+    settings = get_settings()
+
+    # Authentication setup: validate configuration early and ensure the users
+    # table exists. A misconfigured secret should fail loudly at boot, not on
+    # the first login.
+    if settings.auth_enabled:
+        settings.require_jwt_secret()
+        try:
+            apply_auth_schema(settings)
+        except Exception:  # noqa: BLE001 - never let schema setup crash boot
+            logger.exception(
+                "Failed to apply auth schema; registration and login will be "
+                "unavailable until the database is reachable and migrated."
+            )
+
+    if settings.tracing_enabled:
+        _start_observability_platform()
+
+    yield
+
+
+app = FastAPI(title="Production RAG", version="0.1.0", lifespan=lifespan)
+
+# Restrict cross-origin access to the configured console origin(s). A wildcard
+# with credentials is invalid in browsers and unsafe, so origins are explicit
+# and configurable via RAG_CORS_ALLOW_ORIGINS.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_settings().cors_allow_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Trace-Id"],
 )
+
+# Authentication endpoints (/auth/register, /auth/login, /auth/me).
+app.include_router(auth_router)
 
 
 @lru_cache
@@ -191,14 +242,6 @@ def _start_observability_platform() -> None:
     retention.start()
 
     logger.info("Observability platform started (flush workers + retention scheduler)")
-
-
-@app.on_event("startup")
-async def _on_startup() -> None:
-    """FastAPI startup hook — wire the observability platform when tracing is enabled."""
-    settings = get_settings()
-    if settings.tracing_enabled:
-        _start_observability_platform()
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +395,7 @@ def metrics_endpoint() -> PlainTextResponse:
     "/documents",
     response_model=DocumentRecord,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(get_current_user)],
 )
 async def upload_document(
     request: Request,
@@ -374,6 +418,7 @@ async def upload_document(
     "/documents/{document_id}",
     response_model=DocumentRecord,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(get_current_user)],
 )
 async def update_document(
     document_id: str,
@@ -392,7 +437,11 @@ async def update_document(
     return record
 
 
-@app.delete("/documents/{document_id}", response_model=DocumentRecord)
+@app.delete(
+    "/documents/{document_id}",
+    response_model=DocumentRecord,
+    dependencies=[Depends(get_current_user)],
+)
 def delete_document(document_id: str) -> DocumentRecord:
     record = get_service().delete_document(document_id)
     if not record:
@@ -434,7 +483,11 @@ async def _read_document_upload(request: Request, file: UploadFile) -> bytes:
     return content
 
 
-@app.get("/documents/{document_id}", response_model=DocumentRecord)
+@app.get(
+    "/documents/{document_id}",
+    response_model=DocumentRecord,
+    dependencies=[Depends(get_current_user)],
+)
 def get_document(document_id: str) -> DocumentRecord:
     record = get_service().get_document(document_id)
     if not record:
@@ -442,13 +495,21 @@ def get_document(document_id: str) -> DocumentRecord:
     return record
 
 
-@app.get("/documents", response_model=list[DocumentRecord])
+@app.get(
+    "/documents",
+    response_model=list[DocumentRecord],
+    dependencies=[Depends(get_current_user)],
+)
 def list_documents() -> list[DocumentRecord]:
     """List all uploaded documents."""
     return get_service().list_documents()
 
 
-@app.post("/ask", response_model=UnifiedQueryResponse)
+@app.post(
+    "/ask",
+    response_model=UnifiedQueryResponse,
+    dependencies=[Depends(get_current_user)],
+)
 def ask(request: UnifiedQueryRequest) -> UnifiedQueryResponse:
     """Unified endpoint — auto-routes to RAG, database copilot, or both."""
     logger.info(
@@ -470,7 +531,7 @@ def _format_sse(event: dict) -> str:
     return f"event: {event['type']}\ndata: {payload}\n\n"
 
 
-@app.post("/ask/stream")
+@app.post("/ask/stream", dependencies=[Depends(get_current_user)])
 async def ask_stream(request: UnifiedQueryRequest, http_request: Request) -> StreamingResponse:
     """Streaming variant of /ask.
 
@@ -547,7 +608,11 @@ async def ask_stream(request: UnifiedQueryRequest, http_request: Request) -> Str
     )
 
 
-@app.post("/query", response_model=QueryResponse)
+@app.post(
+    "/query",
+    response_model=QueryResponse,
+    dependencies=[Depends(get_current_user)],
+)
 def query(request: QueryRequest) -> QueryResponse:
     logger.info(
         "Query received (%d chars)",
@@ -557,7 +622,11 @@ def query(request: QueryRequest) -> QueryResponse:
     return get_service().query(request)
 
 
-@app.get("/queries/{trace_id}", response_model=QueryTraceRecord)
+@app.get(
+    "/queries/{trace_id}",
+    response_model=QueryTraceRecord,
+    dependencies=[Depends(get_current_user)],
+)
 def get_query_trace(trace_id: str) -> QueryTraceRecord:
     record = get_service().get_query_trace(trace_id)
     if not record:
@@ -565,7 +634,11 @@ def get_query_trace(trace_id: str) -> QueryTraceRecord:
     return record
 
 
-@app.post("/queries/{trace_id}/feedback", response_model=QueryFeedbackRecord)
+@app.post(
+    "/queries/{trace_id}/feedback",
+    response_model=QueryFeedbackRecord,
+    dependencies=[Depends(get_current_user)],
+)
 def record_query_feedback(
     trace_id: str,
     feedback: QueryFeedbackRequest,
@@ -576,7 +649,11 @@ def record_query_feedback(
     return record
 
 
-@app.post("/copilot/query", response_model=CopilotQueryResponse)
+@app.post(
+    "/copilot/query",
+    response_model=CopilotQueryResponse,
+    dependencies=[Depends(get_current_user)],
+)
 def copilot_query(request: CopilotQueryRequest) -> CopilotQueryResponse:
     logger.info(
         "Copilot query received (%d chars)",
@@ -596,7 +673,7 @@ def copilot_query(request: CopilotQueryRequest) -> CopilotQueryResponse:
 # ---------------------------------------------------------------------------
 
 
-@app.get("/traces/{trace_id}")
+@app.get("/traces/{trace_id}", dependencies=[Depends(get_current_user)])
 def get_trace(trace_id: str) -> Trace:
     """Fetch a single trace and all of its spans by trace_id (R7).
 
@@ -619,7 +696,7 @@ def get_trace(trace_id: str) -> Trace:
     return trace
 
 
-@app.get("/traces")
+@app.get("/traces", dependencies=[Depends(get_current_user)])
 def search_traces(
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
@@ -677,7 +754,7 @@ def search_traces(
 # ---------------------------------------------------------------------------
 
 
-@app.get("/logs/{trace_id}")
+@app.get("/logs/{trace_id}", dependencies=[Depends(get_current_user)])
 def get_logs_by_trace(trace_id: str) -> list[LogRecordModel]:
     """Fetch all log records correlated to a trace_id (R15).
 
@@ -698,7 +775,7 @@ def get_logs_by_trace(trace_id: str) -> list[LogRecordModel]:
     return get_log_store().get_by_trace(trace_id)
 
 
-@app.get("/logs")
+@app.get("/logs", dependencies=[Depends(get_current_user)])
 def search_logs(
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),

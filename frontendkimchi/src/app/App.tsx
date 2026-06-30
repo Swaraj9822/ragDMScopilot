@@ -2,6 +2,8 @@ import { Suspense, lazy } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "../components/common/AppShell";
 import { PageLoading } from "../components/common/PageLoading";
+import { useAuth } from "../hooks/useAuth";
+import LoginPage from "../pages/LoginPage";
 
 // Lazy-load pages in production to defer heavy chunks until each tab is visited.
 // In Vitest, eager imports avoid flakiness from unresolved dynamic imports in jsdom.
@@ -18,6 +20,22 @@ const DocumentsPage = isTest
   : lazy(() => import("../pages/DocumentsPage"));
 
 export function App() {
+  const { status } = useAuth();
+
+  // Resolving a stored session — hold the chrome back until we know.
+  if (status === "loading") {
+    return (
+      <div style={{ padding: "var(--space-6)" }}>
+        <PageLoading />
+      </div>
+    );
+  }
+
+  // No valid session — the login screen owns the whole viewport (no app shell).
+  if (status === "unauthenticated") {
+    return <LoginPage />;
+  }
+
   return (
     <AppShell>
       <Suspense fallback={<PageLoading />}>

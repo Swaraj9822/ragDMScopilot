@@ -1,0 +1,29 @@
+# Keep the backend build context small and free of secrets/local state.
+.git
+.gitignore
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.hypothesis
+.mypy_cache
+tests
+docs
+scripts
+.kiro
+.kimchi
+.agents
+.vscode
+
+# Frontend has its own build context (./frontendkimchi).
+frontendkimchi
+
+# Secrets and local artifacts — provided to containers via env_file, never baked in.
+.env
+*.log
+*.pdf
+dlq-redrive.json
+skills-lock.json

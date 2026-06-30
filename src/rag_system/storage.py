@@ -14,7 +14,9 @@ class S3ArtifactStore:
     def __init__(self, settings: Settings):
         self._bucket = settings.s3_bucket
         self._kms_key_id = settings.s3_kms_key_id
-        self._client = settings.boto3_session().client("s3")
+        self._client = settings.boto3_session().client(
+            "s3", config=settings.boto3_client_config()
+        )
         logger.info("S3ArtifactStore initialised (bucket=%s)", self._bucket)
 
     @property

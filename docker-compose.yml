@@ -1,0 +1,62 @@
+# Single-host deployment: Caddy (HTTPS) -> nginx (web) -> API + ingestion worker.
+# Caddy terminates TLS on 80/443 and forwards to the nginx `web` container, which
+# serves the SPA and proxies /api to the backend. Secrets/config come from .env.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    expose:
+      - "8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "rag_system.worker"]
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  # nginx: serves the built SPA and reverse-proxies /api -> api:8000.
+  # No host port mapping — only Caddy talks to it, over the internal network.
+  web:
+    build:
+      context: ./frontendkimchi
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    expose:
+      - "80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Caddy: automatic HTTPS (Let's Encrypt) + HTTP->HTTPS redirect.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3 (QUIC)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data       # persists issued certificates across restarts
+      - caddy_config:/config
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

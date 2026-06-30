@@ -12,7 +12,7 @@ module.exports = {
   rules: {
     "react-refresh/only-export-components": [
       "warn",
-      { allowConstantExport: true, allowExportNames: ["useTheme", "useToast"] },
+      { allowConstantExport: true, allowExportNames: ["useTheme", "useToast", "useAuth"] },
     ],
     "@typescript-eslint/no-unused-vars": [
       "error",

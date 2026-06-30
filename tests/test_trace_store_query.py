@@ -102,7 +102,7 @@ class _FakeCursor:
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         if "FROM spans" in sql:
-            self._execute_spans(params)
+            self._execute_spans(sql, params)
         elif "FROM traces" in sql and "WHERE trace_id = %s" in sql:
             self._execute_get_trace(params)
         elif "FROM traces" in sql:
@@ -115,23 +115,41 @@ class _FakeCursor:
         row = self._db.traces.get(trace_id)
         self._result = [] if row is None else [self._trace_tuple(row)]
 
-    def _execute_spans(self, params: tuple[Any, ...]) -> None:
-        trace_id = params[0]
-        spans = list(self._db.spans.get(trace_id, []))
-        # Honour ORDER BY start_ts ASC, span_id ASC (R7.2).
-        spans.sort(key=lambda s: (s.start_ts, s.span_id))
-        self._result = [
-            (
-                s.span_id,
-                s.parent_span_id,
-                s.operation,
-                s.start_ts,
-                s.duration_ms,
-                s.status,
-                s.attributes,
-            )
-            for s in spans
-        ]
+    def _execute_spans(self, sql: str, params: tuple[Any, ...]) -> None:
+        # Two span queries exist in production:
+        #   * SELECT_SPANS_SQL          — WHERE trace_id = %s  (single trace)
+        #   * SELECT_SPANS_FOR_TRACES_SQL — WHERE trace_id = ANY(%s), with
+        #     trace_id appended as the final selected column so search_traces
+        #     can group the batched result in one round trip (no N+1).
+        batched = "ANY(" in sql
+        if batched:
+            trace_ids = list(params[0])
+            spans = [
+                span
+                for trace_id in trace_ids
+                for span in self._db.spans.get(trace_id, [])
+            ]
+            # Honour ORDER BY trace_id ASC, start_ts ASC, span_id ASC.
+            spans.sort(key=lambda s: (s.trace_id, s.start_ts, s.span_id))
+            self._result = [(*self._span_tuple(s), s.trace_id) for s in spans]
+        else:
+            trace_id = params[0]
+            spans = list(self._db.spans.get(trace_id, []))
+            # Honour ORDER BY start_ts ASC, span_id ASC (R7.2).
+            spans.sort(key=lambda s: (s.start_ts, s.span_id))
+            self._result = [self._span_tuple(s) for s in spans]
+
+    @staticmethod
+    def _span_tuple(s: _SpanRow) -> tuple[Any, ...]:
+        return (
+            s.span_id,
+            s.parent_span_id,
+            s.operation,
+            s.start_ts,
+            s.duration_ms,
+            s.status,
+            s.attributes,
+        )
 
     def _execute_search(self, sql: str, params: tuple[Any, ...]) -> None:
         # params end with the LIMIT; the leading params bind the WHERE clauses in

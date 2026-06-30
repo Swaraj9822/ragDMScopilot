@@ -24,6 +24,8 @@ export const LOCALSTORAGE_KEYS = {
   selectedDocuments: "rag-console:selected-documents:v1",
   copilotHistory: "rag-console:copilot-history:v1",
   observability: "rag-console:observability-preferences:v1",
+  authAccessToken: "rag-console:auth:access:v1",
+  authRefreshToken: "rag-console:auth:refresh:v1",
 } as const;
 
 export const PIPELINE_STEPS = [

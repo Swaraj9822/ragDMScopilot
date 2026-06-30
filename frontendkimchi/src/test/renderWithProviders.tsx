@@ -4,6 +4,8 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "../hooks/useTheme";
 import { ToastProvider } from "../hooks/useToast";
+import { AuthProvider } from "../hooks/useAuth";
+import { setTokens } from "../api/tokenStore";
 
 export function makeTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -21,11 +23,17 @@ interface Options {
 
 export function renderWithProviders(ui: ReactElement, options: Options = {}) {
   const client = options.client ?? makeTestQueryClient();
+  // Seed an authenticated session so the app shell renders. Auth is not what
+  // these tests exercise; the /auth/me handler in test/server.ts resolves the
+  // user. Cleared between tests by test/setup.ts.
+  setTokens({ access: "test-access-token", refresh: "test-refresh-token" });
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>
       <ThemeProvider>
         <ToastProvider>
-          <MemoryRouter initialEntries={[options.route ?? "/"]}>{children}</MemoryRouter>
+          <AuthProvider>
+            <MemoryRouter initialEntries={[options.route ?? "/"]}>{children}</MemoryRouter>
+          </AuthProvider>
         </ToastProvider>
       </ThemeProvider>
     </QueryClientProvider>
