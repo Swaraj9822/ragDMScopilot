@@ -28,6 +28,9 @@ build/
 .idea/
 *.swp
 
+# Local tooling (portable gh CLI, etc.)
+.tools/
+
 # Logs
 *.err.log
 *.out.log

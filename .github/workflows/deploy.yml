@@ -1,0 +1,97 @@
+name: Deploy
+
+# Continuous deployment to the single GCP VM that runs the docker-compose stack
+# (api + worker + web/nginx + caddy). This mirrors the manual flow in DEPLOY.md:
+# SSH to the VM, update the checkout, then `docker compose up -d --build`.
+#
+# MODE (Option A): every push to main auto-deploys to the VM, with no manual
+# gate. A workflow_dispatch trigger is also kept for ad-hoc / rollback deploys.
+# The `production` GitHub Environment groups the deployment history; add
+# required reviewers there later if you ever want to reintroduce an approval.
+on:
+  # Option A: fully automated — every push to main deploys to the VM.
+  push:
+    branches: [main]
+  # Manual trigger is also kept available for ad-hoc / rollback deploys.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref (branch, tag, or SHA) to deploy"
+        required: true
+        default: main
+
+# Never let two deploys run at once, and never cancel one mid-flight.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Configure required reviewers / secrets on this Environment in GitHub
+    # (Settings -> Environments -> production) to gate production deploys.
+    environment: production
+    steps:
+      - name: Configure SSH access to the VM
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "${VM_PORT:-22}" -H "$VM_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_PORT: ${{ secrets.VM_SSH_PORT }}
+
+      - name: Deploy stack on the VM
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_PORT: ${{ secrets.VM_SSH_PORT }}
+          # On push events inputs.ref is empty, so fall back to the pushed
+          # branch (github.ref_name, e.g. "main"). Manual runs use the input.
+          DEPLOY_REF: ${{ inputs.ref || github.ref_name }}
+          # Path to the repo checkout on the VM. Override with a repo variable
+          # (Settings -> Variables) if it lives elsewhere than ~/rag-console.
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+        run: |
+          set -euo pipefail
+          # DEPLOY_DIR is provided as a repo variable (absolute path). Fall back
+          # to the known VM checkout path; avoid a "~" here since it would not
+          # expand inside the quoted cd below.
+          REMOTE_DIR="${DEPLOY_DIR:-/home/swara/rag-console}"
+          # Build the remote script on the runner; env values are interpolated
+          # here, then the script is executed on the VM over SSH.
+          ssh -i ~/.ssh/id_deploy -p "${VM_PORT:-22}" \
+            "${VM_USER}@${VM_HOST}" \
+            "bash -s" <<EOF
+          set -euo pipefail
+          cd "${REMOTE_DIR}"
+          echo "Deploying ref '${DEPLOY_REF}' in \$(pwd)"
+          git fetch --all --prune
+          git checkout "${DEPLOY_REF}"
+          git pull --ff-only origin "${DEPLOY_REF}" || true
+          docker compose up -d --build
+          docker image prune -f
+          docker compose ps
+          EOF
+
+      - name: Smoke check (API health via the public endpoint)
+        continue-on-error: true
+        env:
+          HEALTH_URL: ${{ vars.HEALTH_URL }}
+        run: |
+          URL="${HEALTH_URL:-https://34.139.146.167.nip.io/api/health}"
+          echo "Checking $URL"
+          for i in 1 2 3 4 5; do
+            if curl -fsS --max-time 10 "$URL"; then
+              echo "Health check passed."
+              exit 0
+            fi
+            echo "Attempt $i failed; retrying in 10s..."
+            sleep 10
+          done
+          echo "Health check did not pass (deploy may still be starting)."
+          exit 1
