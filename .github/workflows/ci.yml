@@ -1,0 +1,64 @@
+name: CI
+
+# Lint + test on every push and pull request. This pipeline runs entirely on
+# the runner and needs no real credentials: the app constructs Settings at
+# import time, so the few required fields are supplied as harmless, clearly
+# non-secret placeholders. Tests that need live services (Postgres, Pinecone,
+# Bedrock) skip themselves when those are absent.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    # Non-secret placeholders. Settings() requires these fields to construct;
+    # no real infrastructure is contacted during the test run.
+    env:
+      RAG_S3_BUCKET: ci-bucket
+      RAG_INGESTION_QUEUE_URL: https://sqs.ci.invalid/queue
+      LLAMA_CLOUD_API_KEY: llx-ci-placeholder
+      PINECONE_API_KEY: pc-ci-placeholder
+      PINECONE_INDEX_NAME: ci-index
+      RAG_JWT_SECRET_KEY: ci-placeholder-secret-not-a-real-key
+      RAG_AUTH_ENABLED: "true"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Run tests
+        run: >-
+          pytest -q
+          --cov=rag_system
+          --cov-report=term-missing
+          --cov-report=xml

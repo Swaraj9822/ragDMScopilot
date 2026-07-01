@@ -28,6 +28,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.2.0",
+  "pytest-cov>=5.0.0",
   "ruff>=0.5.0",
 ]
 
@@ -41,6 +42,8 @@ packages = ["src/rag_system"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Lint application code only; steering/tooling and generated dirs are excluded.
+extend-exclude = [".kiro", ".agents", "frontendkimchi"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
