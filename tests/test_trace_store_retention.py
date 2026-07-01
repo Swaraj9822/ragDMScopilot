@@ -26,6 +26,7 @@ from typing import Any, cast
 import pytest
 
 from rag_system.config import Settings
+from rag_system.observability_tracing import trace_store as trace_store_module
 from rag_system.observability_tracing.trace_store import PostgresTraceStore
 
 
@@ -162,13 +163,27 @@ def test_no_period_retains_everything_without_opening_connection() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_removes_strictly_older_cascades_spans_and_retains_boundary() -> None:
-    now = datetime.now(timezone.utc)
+def test_removes_strictly_older_cascades_spans_and_retains_boundary(monkeypatch) -> None:
+    # Freeze the clock so the store's internal cutoff (now - max_age) matches the
+    # trace timestamps exactly. Without this the test is timing-dependent: the
+    # store calls datetime.now() a moment after the test does, so a trace placed
+    # exactly at the boundary ends up microseconds older than the cutoff and is
+    # wrongly removed. (This passes on Windows, whose datetime.now() has ~15ms
+    # resolution, but fails on Linux CI where the two now() calls differ.)
+    fixed_now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: D401 - test double
+            return fixed_now if tz is None else fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(trace_store_module, "datetime", _FrozenDateTime)
+
     max_age = timedelta(hours=24)
     db = _FakeDB()
-    db.add("old", now - timedelta(hours=48), ["s1", "s2"])      # strictly older -> removed
-    db.add("boundary", now - max_age, ["s3"])                   # exactly at boundary -> kept
-    db.add("recent", now - timedelta(hours=1), ["s4"])          # within period -> kept
+    db.add("old", fixed_now - timedelta(hours=48), ["s1", "s2"])  # strictly older -> removed
+    db.add("boundary", fixed_now - max_age, ["s3"])               # exactly at boundary -> kept
+    db.add("recent", fixed_now - timedelta(hours=1), ["s4"])      # within period -> kept
 
     store = _store(db)
     store.enforce_retention(max_age)
