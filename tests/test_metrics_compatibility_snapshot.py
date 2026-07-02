@@ -143,8 +143,11 @@ class TestMetricsEndpointCompatibility:
         assert body.strip(), "Metrics output must not be empty"
 
         # Every non-empty line must be a comment or a metric sample line.
+        # Label *values* are quoted and may legitimately contain braces (e.g. a
+        # templated route label like path="/documents/{document_id}"), so the
+        # label block is matched permissively rather than as brace-free text.
         metric_line_re = re.compile(
-            r"^[a-zA-Z_:][a-zA-Z0-9_:]*(\{[^}]*\})?\s+[\d.eE+\-]+$"
+            r"^[a-zA-Z_:][a-zA-Z0-9_:]*(\{.*\})?\s+[\d.eE+\-]+$"
         )
         comment_re = re.compile(r"^#\s")
 

@@ -30,14 +30,39 @@ class IngestionWorker:
         self,
         service: RagService,
         queue: SqsIngestionQueue,
+        max_concurrency: int | None = None,
     ) -> None:
         self._service = service
         self._queue = queue
+        # How many messages from a single poll to process concurrently. Falls
+        # back to the service's configured value, then to 1 (sequential) so test
+        # doubles and minimal wiring behave exactly as before.
+        if max_concurrency is None:
+            max_concurrency = getattr(
+                getattr(service, "_settings", None), "ingestion_max_concurrency", 1
+            )
+        self._max_concurrency = max(1, max_concurrency)
 
     async def process_once(self) -> int:
         messages = self._queue.receive()
-        for message in messages:
-            await self._process_message(message)
+        if not messages:
+            return 0
+        if self._max_concurrency <= 1 or len(messages) == 1:
+            for message in messages:
+                await self._process_message(message)
+            return len(messages)
+
+        # Drain the batch concurrently under a bounded semaphore so a burst of
+        # uploads is not processed strictly one-at-a-time. Each message owns its
+        # own trace/status handling and failures are contained per-message
+        # inside _process_message, so gather never aborts the whole batch.
+        semaphore = asyncio.Semaphore(self._max_concurrency)
+
+        async def _guarded(message: ReceivedIngestionJob) -> None:
+            async with semaphore:
+                await self._process_message(message)
+
+        await asyncio.gather(*(_guarded(message) for message in messages))
         return len(messages)
 
     async def run_forever(self) -> None:

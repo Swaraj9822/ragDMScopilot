@@ -22,7 +22,15 @@ class Settings(BaseSettings):
     s3_kms_key_id: str | None = Field(default=None, alias="RAG_S3_KMS_KEY_ID")
     ingestion_queue_url: str = Field(alias="RAG_INGESTION_QUEUE_URL")
     ingestion_poll_seconds: int = Field(default=20, alias="RAG_INGESTION_POLL_SECONDS")
-    ingestion_max_messages: int = Field(default=1, alias="RAG_INGESTION_MAX_MESSAGES")
+    ingestion_max_messages: int = Field(default=10, alias="RAG_INGESTION_MAX_MESSAGES")
+    # How many received ingestion messages to process concurrently within a
+    # single poll cycle. Bounded so a burst upload drains in parallel instead of
+    # one-at-a-time, without swamping Bedrock/Pinecone. Ensure the SQS queue's
+    # visibility timeout comfortably exceeds worst-case ingestion time so an
+    # in-flight message is not redelivered while still being processed.
+    ingestion_max_concurrency: int = Field(
+        default=4, alias="RAG_INGESTION_MAX_CONCURRENCY"
+    )
 
     llama_cloud_api_key: str = Field(alias="LLAMA_CLOUD_API_KEY")
 
@@ -33,6 +41,11 @@ class Settings(BaseSettings):
         default="amazon.titan-embed-text-v2:0", alias="BEDROCK_EMBEDDING_MODEL_ID"
     )
     embedding_dimension: int = Field(default=1024, alias="EMBEDDING_DIMENSION")
+    # Titan v2 has no batch embedding API, so chunks are embedded one request
+    # each. Issuing those requests concurrently (bounded) turns a serial
+    # per-chunk round-trip into a parallel fan-out — the dominant ingestion
+    # latency win for multi-hundred-chunk documents.
+    embedding_max_workers: int = Field(default=8, alias="RAG_EMBEDDING_MAX_WORKERS")
     bedrock_rerank_model_id: str = Field(
         default="cohere.rerank-v3-5:0", alias="BEDROCK_RERANK_MODEL_ID"
     )
@@ -60,6 +73,16 @@ class Settings(BaseSettings):
     max_upload_bytes: int = Field(default=10 * 1024 * 1024, alias="RAG_MAX_UPLOAD_BYTES")
     retrieval_dense_top_k: int = Field(default=60, alias="RAG_DENSE_TOP_K")
     retrieval_sparse_top_k: int = Field(default=60, alias="RAG_SPARSE_TOP_K")
+    # Pinecone recommends batches of ~100 vectors per upsert; a large document
+    # can otherwise exceed the request size limit and fail the whole ingestion.
+    pinecone_upsert_batch_size: int = Field(
+        default=100, alias="RAG_PINECONE_UPSERT_BATCH_SIZE"
+    )
+    # Concurrency for fanning out the per-document S3 reads behind
+    # ``GET /documents`` so the listing does not degrade to N serial round-trips.
+    document_list_max_workers: int = Field(
+        default=16, alias="RAG_DOCUMENT_LIST_MAX_WORKERS"
+    )
     rerank_top_k: int = Field(default=12, alias="RAG_RERANK_TOP_K")
     rerank_enabled: bool = Field(default=False, alias="RAG_RERANK_ENABLED")
     sparse_enabled: bool = Field(default=True, alias="RAG_SPARSE_ENABLED")
@@ -72,6 +95,10 @@ class Settings(BaseSettings):
     copilot_db_host: str | None = Field(default=None, alias="COPILOT_DB_HOST")
     copilot_db_port: int = Field(default=5432, alias="COPILOT_DB_PORT")
     copilot_db_name: str | None = Field(default=None, alias="COPILOT_DB_NAME")
+    # Defense-in-depth: point COPILOT_DB_USER at a dedicated role that holds only
+    # SELECT grants on the approved tables and has `default_transaction_read_only
+    # = on`. Then even if a crafted query slips past CopilotSqlGuard, the database
+    # itself refuses writes — validation is no longer the last line of defense.
     copilot_db_user: str | None = Field(default=None, alias="COPILOT_DB_USER")
     copilot_db_password: str | None = Field(default=None, alias="COPILOT_DB_PASSWORD")
     copilot_db_sslmode: str = Field(default="require", alias="COPILOT_DB_SSLMODE")
@@ -104,6 +131,26 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"invalid hybrid overlap threshold {value!r}: must be within "
                 "the inclusive range [0.0, 1.0]"
+            )
+        return value
+
+    @field_validator(
+        "embedding_max_workers",
+        "pinecone_upsert_batch_size",
+        "document_list_max_workers",
+        "ingestion_max_concurrency",
+    )
+    @classmethod
+    def _validate_positive_bounded_int(cls, value: int) -> int:
+        """These concurrency/batch knobs must be a sane positive integer.
+
+        A zero/negative value would stall or crash the corresponding fan-out,
+        and an absurdly large one would defeat the bound it exists to enforce,
+        so we clamp the accepted range to ``[1, 1000]`` and fail fast otherwise.
+        """
+        if value < 1 or value > 1000:
+            raise ValueError(
+                f"invalid value {value!r}: must be within 1 and 1000 inclusive"
             )
         return value
 
@@ -173,6 +220,13 @@ class Settings(BaseSettings):
     # /metrics, /docs, and /auth/*) requires a valid bearer token. Disable it
     # (RAG_AUTH_ENABLED=false) only for trusted local/single-user setups.
     auth_enabled: bool = Field(default=True, alias="RAG_AUTH_ENABLED")
+    # Optional dedicated bearer token for the /metrics scrape endpoint. When set,
+    # /metrics requires "Authorization: Bearer <token>" (configure your
+    # Prometheus scrape job's bearer_token accordingly), closing the default
+    # public exposure that leaks route latencies, error rates, and model ids.
+    # When unset the endpoint stays open for backward compatibility — set this in
+    # production, or block /metrics at the reverse proxy and keep only /health open.
+    metrics_token: str | None = Field(default=None, alias="RAG_METRICS_TOKEN")
     # Open self-service registration. When False (default), /auth/register is
     # closed once at least one account exists — the first registration is still
     # allowed so an initial operator can bootstrap, then the endpoint locks down

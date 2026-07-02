@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import secrets
 import threading
 import time
 import uuid
@@ -21,6 +22,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.routing import APIRoute
 
 from rag_system.auth import apply_schema as apply_auth_schema
 from rag_system.auth import get_current_user
@@ -252,6 +254,47 @@ def _start_observability_platform() -> None:
 #: hexadecimal string (R7.3).
 _TRACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
+#: Single source of truth for the streaming endpoint path. Referenced by both
+#: the route decorator and the middleware's tracing branch below, so renaming
+#: the route updates both at once instead of silently changing tracing behavior
+#: if only one string were edited.
+_ASK_STREAM_PATH = "/ask/stream"
+
+
+def _resolve_inbound_trace_id(header_value: str | None) -> str:
+    """Return a valid trace id for an incoming request.
+
+    A client-supplied ``X-Trace-Id`` is trusted only when it is syntactically
+    valid (32 lowercase hex chars) — the same shape ``GET /traces/{id}`` accepts.
+    A malformed or uppercase value would otherwise produce a trace that can
+    never be fetched by id, so we regenerate one instead of adopting it.
+    """
+    if header_value and _TRACE_ID_RE.fullmatch(header_value):
+        return header_value
+    return uuid.uuid4().hex
+
+
+def verify_metrics_access(request: Request) -> None:
+    """Gate ``/metrics`` behind a dedicated bearer token when one is configured.
+
+    Prometheus scrapers don't carry user JWTs, so when ``RAG_METRICS_TOKEN`` is
+    set the scrape job authenticates with that token instead. When it is unset
+    the endpoint stays open (backward compatible); set it in production, or block
+    ``/metrics`` at the reverse proxy, so route latencies and model ids are not
+    publicly readable.
+    """
+    token = get_settings().metrics_token
+    if not token:
+        return
+    provided = request.headers.get("Authorization", "")
+    expected = f"Bearer {token}"
+    if not secrets.compare_digest(provided, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Valid metrics token required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
 #: Result-limit bounds for trace search (R8.7).
 _MIN_TRACE_LIMIT = 1
 _MAX_TRACE_LIMIT = 1000
@@ -270,10 +313,32 @@ _MAX_LOG_LIMIT = 1000
 # ---------------------------------------------------------------------------
 
 
+def _metric_path_label(request: Request) -> str:
+    """Return a bounded ``path`` label for HTTP metrics.
+
+    The matched route's *template* (e.g. ``/documents/{document_id}``) is used
+    instead of the concrete request path (``/documents/3f2a...``) so that
+    per-id/per-uuid paths do not mint a brand-new Prometheus label set on every
+    request. Left unbounded, the in-process registry would grow forever (a slow
+    memory leak) and the exposition would be swamped by one-off series.
+
+    Starlette resolves the route during ``call_next`` and stores it on the same
+    ``scope`` dict this ``request`` wraps, so this must be read *after*
+    ``call_next`` returns. When no route matched (404s, or an error raised
+    before routing completed) a fixed sentinel is returned, which likewise keeps
+    cardinality bounded. Structured logs continue to use the real path.
+    """
+    route = request.scope.get("route")
+    template = getattr(route, "path", None)
+    if isinstance(template, str) and template:
+        return template
+    return "__unmatched__"
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start = time.perf_counter()
-    trace_id = request.headers.get("X-Trace-Id") or uuid.uuid4().hex
+    trace_id = _resolve_inbound_trace_id(request.headers.get("X-Trace-Id"))
     token = set_trace_id(trace_id)
     # Begin a fresh per-request LLM token tally so any generation triggered by
     # this request (including parallel hybrid branches) is summed for its trace.
@@ -289,7 +354,7 @@ async def log_requests(request: Request, call_next):
         # *after* this middleware returns, so wrapping it in start_trace here
         # would close the trace before the streaming work runs. /ask/stream
         # opens and owns its own trace inside the response generator instead.
-        if request.url.path == "/ask/stream":
+        if request.url.path == _ASK_STREAM_PATH:
             response = await call_next(request)
         else:
             # Open the request's Root_Span so the call is captured as a trace in
@@ -305,7 +370,7 @@ async def log_requests(request: Request, call_next):
         elapsed_ms = (time.perf_counter() - start) * 1000
         labels = {
             "method": request.method,
-            "path": request.url.path,
+            "path": _metric_path_label(request),
             "status_code": "500",
         }
         metrics.increment("rag_http_requests_total", labels)
@@ -329,7 +394,7 @@ async def log_requests(request: Request, call_next):
     response.headers["X-Trace-Id"] = trace_id
     labels = {
         "method": request.method,
-        "path": request.url.path,
+        "path": _metric_path_label(request),
         "status_code": str(response.status_code),
     }
     metrics.increment("rag_http_requests_total", labels)
@@ -356,25 +421,26 @@ async def log_requests(request: Request, call_next):
 # ---------------------------------------------------------------------------
 
 
-@app.get("/")
+@app.get("/", dependencies=[Depends(get_current_user)])
 def root() -> dict[str, object]:
+    """Service metadata plus a live, self-describing endpoint listing.
+
+    The endpoint list is generated from the router so it can never drift from
+    the actual routes (the previous hand-maintained catalog had already fallen
+    out of sync). See ``/docs`` for full request/response schemas.
+    """
+    endpoints = sorted(
+        f"{method} {route.path}"
+        for route in app.routes
+        if isinstance(route, APIRoute)
+        for method in (route.methods or set())
+        if method not in ("HEAD", "OPTIONS")
+    )
     return {
         "name": "Production RAG",
         "status": "ok",
         "docs": "/docs",
-        "endpoints": {
-            "health": "/health",
-            "metrics": "/metrics",
-            "ask": "POST /ask",
-            "upload_document": "POST /documents",
-            "get_document": "GET /documents/{document_id}",
-            "update_document": "PUT /documents/{document_id}",
-            "delete_document": "DELETE /documents/{document_id}",
-            "query": "POST /query",
-            "get_query_trace": "GET /queries/{trace_id}",
-            "record_query_feedback": "POST /queries/{trace_id}/feedback",
-            "copilot_query": "POST /copilot/query",
-        },
+        "endpoints": endpoints,
     }
 
 
@@ -383,7 +449,11 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/metrics", response_class=PlainTextResponse)
+@app.get(
+    "/metrics",
+    response_class=PlainTextResponse,
+    dependencies=[Depends(verify_metrics_access)],
+)
 def metrics_endpoint() -> PlainTextResponse:
     return PlainTextResponse(
         metrics.render_prometheus(),
@@ -531,7 +601,7 @@ def _format_sse(event: dict) -> str:
     return f"event: {event['type']}\ndata: {payload}\n\n"
 
 
-@app.post("/ask/stream", dependencies=[Depends(get_current_user)])
+@app.post(_ASK_STREAM_PATH, dependencies=[Depends(get_current_user)])
 async def ask_stream(request: UnifiedQueryRequest, http_request: Request) -> StreamingResponse:
     """Streaming variant of /ask.
 
@@ -553,12 +623,16 @@ async def ask_stream(request: UnifiedQueryRequest, http_request: Request) -> Str
         extra={"query_len": len(request.question)},
     )
     # Adopt the caller's trace id (the console always sends one) so the trace is
-    # clickable from the answer; generate one otherwise.
-    trace_id = http_request.headers.get("X-Trace-Id") or uuid.uuid4().hex
+    # clickable from the answer; regenerate when it is missing or malformed so a
+    # bad header can't produce an unfetchable trace.
+    trace_id = _resolve_inbound_trace_id(http_request.headers.get("X-Trace-Id"))
     router = get_router()
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
     sentinel = object()
+    # Set when the client disconnects so the producer stops the (token-burning)
+    # pipeline instead of running it to completion for nobody.
+    stop_event = threading.Event()
 
     def produce() -> None:
         # Runs in one fresh thread → one stable contextvars context for the
@@ -572,9 +646,16 @@ async def ask_stream(request: UnifiedQueryRequest, http_request: Request) -> Str
 
         try:
             with recorder.start_trace(
-                trace_id=trace_id, route="/ask/stream", is_root_http=True
+                trace_id=trace_id, route=_ASK_STREAM_PATH, is_root_http=True
             ):
                 for event in router.query_stream(request):
+                    if stop_event.is_set():
+                        logger.info(
+                            "Client disconnected; aborting stream production",
+                            extra={"trace_id": trace_id},
+                        )
+                        metrics.increment("rag_stream_client_disconnect_total")
+                        break
                     emit(event)
         except SqlValidationError as exc:
             emit({"type": "error", "detail": str(exc)})
@@ -589,11 +670,24 @@ async def ask_stream(request: UnifiedQueryRequest, http_request: Request) -> Str
     threading.Thread(target=produce, name="ask-stream", daemon=True).start()
 
     async def event_stream():
-        while True:
-            item = await queue.get()
-            if item is sentinel:
-                break
-            yield item
+        try:
+            while True:
+                # Poll for client disconnect even while waiting for the next
+                # event, so a long LLM call for a gone client is cut short.
+                if await http_request.is_disconnected():
+                    stop_event.set()
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                if item is sentinel:
+                    break
+                yield item
+        finally:
+            # Whether we broke out on disconnect or the generator was closed by
+            # the server, tell the producer to stop.
+            stop_event.set()
 
     return StreamingResponse(
         event_stream(),

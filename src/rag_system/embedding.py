@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 from rag_system.config import Settings
 from rag_system.models import Chunk, EmbeddedChunk
@@ -14,6 +15,7 @@ class BedrockTitanEmbedder:
         self._client = settings.bedrock_runtime_client()
         self._model_id = settings.bedrock_embedding_model_id
         self._dimension = settings.embedding_dimension
+        self._max_workers = max(1, settings.embedding_max_workers)
 
     @retry_on_transient()
     def _embed_single(self, text: str) -> list[float]:
@@ -31,11 +33,7 @@ class BedrockTitanEmbedder:
     def _embed(self, texts: list[str]) -> list[list[float]]:
         logger.debug("Embedding %d text(s) with %s", len(texts), self._model_id)
         input_chars = sum(len(text) for text in texts)
-        embeddings: list[list[float]] = []
-        for i, text in enumerate(texts):
-            embeddings.append(self._embed_single(text))
-            if (i + 1) % 25 == 0:
-                logger.debug("Embedded %d / %d", i + 1, len(texts))
+        embeddings = self._embed_many(texts)
         logger.info(
             "Embedded %d text(s) via %s",
             len(texts),
@@ -51,6 +49,24 @@ class BedrockTitanEmbedder:
         metrics.observe("rag_embedding_batch_size", len(texts), {"model_id": self._model_id})
         metrics.observe("rag_embedding_input_chars", input_chars, {"model_id": self._model_id})
         return embeddings
+
+    def _embed_many(self, texts: list[str]) -> list[list[float]]:
+        """Embed many texts, in input order, fanning out concurrent requests.
+
+        Titan v2 embeds one text per request, so a document's chunks were
+        previously embedded in a serial loop — N sequential network round-trips.
+        A bounded thread pool issues those requests concurrently while
+        ``executor.map`` preserves input order, so the returned vectors still
+        line up with ``texts``. Each call keeps its own transient-retry via
+        ``_embed_single``. boto3 clients are thread-safe for concurrent calls.
+        """
+        if len(texts) <= 1 or self._max_workers <= 1:
+            return [self._embed_single(text) for text in texts]
+        workers = min(self._max_workers, len(texts))
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="embed"
+        ) as executor:
+            return list(executor.map(self._embed_single, texts))
 
     def embed_chunks(self, chunks: list[Chunk]) -> list[EmbeddedChunk]:
         if not chunks:

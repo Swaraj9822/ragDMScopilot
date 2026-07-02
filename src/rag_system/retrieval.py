@@ -15,6 +15,7 @@ class PineconeHybridIndex:
         self._index = Pinecone(api_key=settings.pinecone_api_key).Index(
             settings.pinecone_index_name
         )
+        self._upsert_batch_size = max(1, getattr(settings, "pinecone_upsert_batch_size", 100))
         logger.info("Connected to Pinecone index '%s'", settings.pinecone_index_name)
 
     @retry_on_transient()
@@ -73,13 +74,21 @@ class PineconeHybridIndex:
             metrics.observe("rag_pinecone_upsert_sparse_vectors", sparse_count)
             metrics.observe("rag_pinecone_upsert_missing_sparse_vectors", missing_sparse_count)
             metrics.observe("rag_pinecone_upsert_avg_sparse_terms", avg_sparse_terms)
+            # Pinecone caps request size (~2MB); a large document can exceed it
+            # in a single call and fail the whole ingestion. Upsert in bounded
+            # batches so each request stays within limits.
+            batch_size = self._upsert_batch_size
+            batch_count = (len(vectors) + batch_size - 1) // batch_size
             start = time.perf_counter()
-            self._index.upsert(vectors=vectors)
+            for offset in range(0, len(vectors), batch_size):
+                self._index.upsert(vectors=vectors[offset : offset + batch_size])
             duration_ms = (time.perf_counter() - start) * 1000
             metrics.observe("rag_pinecone_upsert_duration_ms", duration_ms)
+            metrics.observe("rag_pinecone_upsert_batches", batch_count)
             logger.info(
-                "Upsert complete (%d vectors, %.0fms)",
+                "Upsert complete (%d vectors in %d batch(es), %.0fms)",
                 len(vectors),
+                batch_count,
                 duration_ms,
                 extra={"vector_count": len(vectors), "duration_ms": duration_ms},
             )

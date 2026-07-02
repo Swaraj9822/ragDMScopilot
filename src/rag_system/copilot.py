@@ -86,6 +86,55 @@ class SqlValidationError(ValueError):
     pass
 
 
+def _strip_sql_comments(sql: str) -> str:
+    """Remove SQL line (``--``) and block (``/* */``) comments.
+
+    Comments are stripped so they cannot be used to smuggle statement
+    terminators or write keywords past the guard, and so keywords that appear
+    only inside a comment do not trigger false rejections. String literals
+    (``'...'``) and quoted identifiers (``"..."``) — including their doubled-quote
+    escapes — are preserved verbatim, so a value like ``'a--b'`` or ``'/*x*/'``
+    is never mangled. This is a targeted scanner, not a full SQL parser.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch in ("'", '"'):
+            # Copy a quoted string/identifier verbatim, honoring '' / "" escapes.
+            quote = ch
+            out.append(ch)
+            i += 1
+            while i < n:
+                out.append(sql[i])
+                if sql[i] == quote:
+                    if i + 1 < n and sql[i + 1] == quote:
+                        out.append(sql[i + 1])
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "-" and i + 1 < n and sql[i + 1] == "-":
+            i += 2
+            while i < n and sql[i] != "\n":
+                i += 1
+            out.append(" ")
+            continue
+        if ch == "/" and i + 1 < n and sql[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (sql[i] == "*" and sql[i + 1] == "/"):
+                i += 1
+            i += 2  # skip the closing */
+            out.append(" ")
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def load_schema_catalog(settings: Settings) -> CopilotSchemaCatalog:
     path = Path(settings.copilot_schema_catalog_path)
     if not path.is_absolute():
@@ -115,7 +164,9 @@ class CopilotSqlGuard:
         self._max_rows = max_rows
 
     def validate(self, sql: str) -> str:
-        sql = sql.strip().rstrip(";")
+        # Strip comments first (string-literal aware) so a hidden ";" or write
+        # keyword inside a comment cannot slip past the checks below.
+        sql = _strip_sql_comments(sql).strip().rstrip(";").strip()
         if not sql:
             raise SqlValidationError("SQL is empty.")
         if ";" in sql:

@@ -1,3 +1,4 @@
+import asyncio
 import contextvars
 import hashlib
 import time
@@ -36,6 +37,7 @@ from rag_system.rerank import BedrockCohereReranker
 from rag_system.retrieval import PineconeHybridIndex
 from rag_system.sparse import BM25SparseEncoder
 from rag_system.storage import (
+    PreconditionFailed,
     S3ArtifactStore,
     chunks_key,
     document_record_key,
@@ -46,6 +48,28 @@ from rag_system.storage import (
 )
 
 logger = get_logger(__name__)
+
+#: Bounded retries for the document-record compare-and-set loop. A conflict
+#: means another writer (API delete vs. ingestion worker) updated the record
+#: between our read and write; we reload and re-evaluate. In practice at most
+#: two writers contend, so a handful of attempts is ample headroom.
+_MAX_RECORD_CAS_ATTEMPTS = 5
+
+
+class DocumentDeletedError(RuntimeError):
+    """Raised when a live status write would resurrect a deleted document.
+
+    The document-record write path treats ``deleted`` as terminal: once a record
+    is deleted (e.g. via ``DELETE /documents/{id}``), the ingestion worker must
+    not overwrite it with ``indexed``/``parsing``/etc. Racing writers previously
+    did exactly that, resurrecting a document whose vectors were already gone.
+    """
+
+    def __init__(self, document_id: str) -> None:
+        super().__init__(
+            f"Document {document_id} was deleted; refusing to resurrect it"
+        )
+        self.document_id = document_id
 
 
 # Bounded pool for best-effort, off-request-path query-trace persistence. A
@@ -132,12 +156,12 @@ class RagService:
         return await self.queue_document(filename, content)
 
     async def update_document(self, document_id: str, filename: str, content: bytes) -> DocumentRecord | None:
-        current = self.get_document(document_id)
+        current = await asyncio.to_thread(self.get_document, document_id)
         if current is None or current.status == DocumentStatus.deleted:
             return None
 
         with timed(logger, "Pinecone document delete before update", document_id=document_id):
-            self.index.delete_document(document_id)
+            await asyncio.to_thread(self.index.delete_document, document_id)
         return await self._queue_document(document_id, filename, content)
 
     def delete_document(self, document_id: str) -> DocumentRecord | None:
@@ -168,7 +192,9 @@ class RagService:
             "Queueing document ingestion: %s (%d bytes)", filename, len(content), extra=log_extra
         )
 
-        s3_uri = self._store.put_raw(document_id, version, filename, content)
+        s3_uri = await asyncio.to_thread(
+            self._store.put_raw, document_id, version, filename, content
+        )
         record = DocumentRecord(
             id=document_id,
             title=filename,
@@ -176,7 +202,7 @@ class RagService:
             s3_uri=s3_uri,
             status=DocumentStatus.queued,
         )
-        self._save_document_record(record)
+        await asyncio.to_thread(self._save_document_record, record)
 
         job = IngestionJob(
             document_id=document_id,
@@ -186,7 +212,7 @@ class RagService:
             trace_id=get_active_trace_id(),
         )
         try:
-            self._queue.enqueue(job)
+            await asyncio.to_thread(self._queue.enqueue, job)
         except Exception as exc:
             failed = record.model_copy(
                 update={
@@ -194,7 +220,7 @@ class RagService:
                     "error": f"Failed to enqueue ingestion job: {exc}",
                 }
             )
-            self._save_document_record(failed)
+            await asyncio.to_thread(self._save_document_record, failed)
             raise
 
         metrics.increment("rag_documents_queued_total")
@@ -333,6 +359,12 @@ class RagService:
             self._save_document_record(final)
             logger.info("Ingestion complete for %s", filename, extra=log_extra)
             return final
+        except DocumentDeletedError:
+            # The document was deleted (DELETE /documents/{id}) while this job
+            # was mid-flight. The record write was refused to avoid resurrecting
+            # it; roll back any vectors we may have already upserted so the
+            # deleted state is consistent, then stop without marking failed.
+            return self._abort_ingestion_for_deleted(document_id, log_extra)
         except Exception as exc:
             # R12.6: The record_span context manager automatically sets the
             # failing stage span status to "error" and records the exception.
@@ -348,8 +380,41 @@ class RagService:
             failed = record.model_copy(
                 update={"status": DocumentStatus.failed, "error": str(exc)}
             )
-            self._save_document_record(failed)
+            try:
+                self._save_document_record(failed)
+            except DocumentDeletedError:
+                # Deletion also won the race against the failure write — the
+                # document is intentionally gone, so don't record a failure.
+                return self._abort_ingestion_for_deleted(document_id, log_extra)
             raise
+
+    def _abort_ingestion_for_deleted(
+        self, document_id: str, log_extra: dict[str, Any]
+    ) -> DocumentRecord:
+        logger.info(
+            "Document deleted during ingestion; rolling back vectors and stopping",
+            extra=log_extra,
+        )
+        try:
+            self.index.delete_document(document_id)
+        except Exception:
+            logger.warning(
+                "Vector rollback after concurrent delete failed",
+                extra=log_extra,
+                exc_info=True,
+            )
+        metrics.increment("rag_documents_deleted_during_ingestion_total")
+        current = self.get_document(document_id)
+        if current is not None:
+            return current
+        # Store no longer has the record; synthesise the terminal deleted view.
+        return DocumentRecord(
+            id=document_id,
+            title="",
+            version="",
+            s3_uri="",
+            status=DocumentStatus.deleted,
+        )
 
     def get_document(self, document_id: str) -> DocumentRecord | None:
         # Only trust the in-memory cache for records in a TERMINAL state. While a
@@ -369,6 +434,13 @@ class RagService:
         payload = self._store.get_json(document_record_key(document_id))
         if payload is None:
             # No canonical record in the store; fall back to any cached copy.
+            # Tradeoff: if another process deleted the record (removing the S3
+            # object) this can briefly serve a stale non-deleted cached copy
+            # until the cache entry is replaced. That is acceptable here —
+            # deletes also write a terminal `deleted` record (see
+            # delete_document), so the object normally still exists and this
+            # branch is only hit when there is genuinely no canonical state to
+            # trust over the cache.
             return cached
 
         record = DocumentRecord.model_validate(payload)
@@ -380,21 +452,42 @@ class RagService:
         return record
 
     def list_documents(self) -> list[DocumentRecord]:
-        """Return all document records ordered by title ascending."""
-        records: list[DocumentRecord] = []
-        for key in self._store.list_document_record_keys():
-            document_id = key[len("documents/") : key.rfind("/record.json")]
-            record = self.get_document(document_id)
-            if record is not None:
-                records.append(record)
+        """Return all document records ordered by title ascending.
+
+        Records live one-per-key in S3, so the listing fans the per-document
+        reads out across a bounded thread pool rather than issuing them one at a
+        time (an N+1 that made the Documents tab scale linearly with the corpus).
+        """
+        document_ids = [
+            key[len("documents/") : key.rfind("/record.json")]
+            for key in self._store.list_document_record_keys()
+        ]
+        if not document_ids:
+            logger.info("Listed 0 documents")
+            return []
+
+        workers = min(
+            getattr(self._settings, "document_list_max_workers", 16), len(document_ids)
+        )
+        if workers <= 1:
+            fetched = [self.get_document(document_id) for document_id in document_ids]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="doc-list"
+            ) as executor:
+                fetched = list(executor.map(self.get_document, document_ids))
+
+        records = [record for record in fetched if record is not None]
         records.sort(key=lambda r: r.title.lower())
         logger.info("Listed %d documents", len(records))
         return records
 
     def _save_document_record(self, record: DocumentRecord) -> None:
-        self._documents[record.id] = record
         key = document_record_key(record.id)
-        self._store.put_json(key, record.model_dump(mode="json"))
+        self._persist_record(record, key)
+        # Only cache after a successful persist so a rejected resurrection never
+        # poisons the in-memory view with a status the store refused.
+        self._documents[record.id] = record
         logger.info(
             "Persisted document record status=%s",
             record.status,
@@ -404,6 +497,60 @@ class RagService:
                 "s3_key": key,
             },
         )
+
+    def _persist_record(self, record: DocumentRecord, key: str) -> None:
+        """Persist a document record, refusing to resurrect a deleted one.
+
+        ``deleted`` is a terminal state: a write that carries any other status
+        is rejected with :class:`DocumentDeletedError` when the canonical stored
+        record is already deleted. This closes the last-writer-wins race where a
+        ``DELETE`` and an in-flight ingestion both wrote ``record.json`` and the
+        worker's ``indexed`` write could overwrite the delete.
+
+        When the store supports compare-and-set (real S3 via ETags) the check
+        and write are atomic: we read the current ETag, verify the invariant,
+        then write conditionally, retrying on conflict. Stores without CAS (the
+        in-memory test doubles, which are single-threaded and never actually
+        race) fall back to a read-then-write guard.
+        """
+        payload = record.model_dump(mode="json")
+        supports_cas = hasattr(self._store, "get_json_with_etag") and hasattr(
+            self._store, "put_json_conditional"
+        )
+        if not supports_cas:
+            # No compare-and-set primitive. Best-effort read-then-write guard
+            # when the store can be read; a write-only store (some minimal test
+            # doubles) simply writes as before. Real S3 always takes the CAS
+            # branch below, so production never relies on this fallback.
+            if hasattr(self._store, "get_json"):
+                self._reject_resurrection(record, self._store.get_json(key))
+            self._store.put_json(key, payload)
+            return
+
+        for _ in range(_MAX_RECORD_CAS_ATTEMPTS):
+            current, etag = self._store.get_json_with_etag(key)
+            self._reject_resurrection(record, current)
+            try:
+                if current is None:
+                    self._store.put_json_conditional(key, payload, if_none_match=True)
+                else:
+                    self._store.put_json_conditional(key, payload, if_match=etag)
+                return
+            except PreconditionFailed:
+                # Another writer changed the record between our read and write.
+                # Reload and re-check the deleted invariant before retrying.
+                continue
+        raise PreconditionFailed(key)
+
+    @staticmethod
+    def _reject_resurrection(record: DocumentRecord, current: object | None) -> None:
+        if record.status == DocumentStatus.deleted:
+            return
+        if (
+            isinstance(current, dict)
+            and current.get("status") == DocumentStatus.deleted.value
+        ):
+            raise DocumentDeletedError(record.id)
 
     def get_query_trace(self, trace_id: str) -> QueryTraceRecord | None:
         payload = self._store.get_json(query_trace_key(trace_id))
@@ -438,23 +585,21 @@ class RagService:
         )
         return record
 
-    def query(self, request: QueryRequest) -> QueryResponse:
-        trace_id = get_trace_id() or str(uuid.uuid4())
-        query_start = time.perf_counter()
-        retrieval_mode = "hybrid" if self._settings.sparse_enabled else "dense"
-        log_extra: dict[str, Any] = {
-            "trace_id": trace_id,
-            "query_len": len(request.question),
-            "retrieval_mode": retrieval_mode,
-        }
-        logger.info("Processing query (trace=%s)", trace_id, extra=log_extra)
-        metrics.increment("rag_queries_total", {"mode": retrieval_mode})
-        metrics.observe("rag_query_length_chars", len(request.question), {"mode": retrieval_mode})
+    def _retrieve(
+        self,
+        request: QueryRequest,
+        recorder: Any,
+        retrieval_mode: str,
+        log_extra: dict[str, Any],
+    ) -> list[RetrievalHit]:
+        """Embed, retrieve, and rerank for a query; return the top hits.
 
-        from rag_system.observability_tracing import get_span_recorder
-
-        recorder = get_span_recorder()
-
+        This is the retrieval half of the pipeline shared by :meth:`query` and
+        :meth:`query_stream`. Keeping it in one place ensures retrieval tuning
+        (embedding, sparse encoding, top-k, rerank) cannot drift between the
+        batch and streaming code paths. Span recording is threaded through the
+        caller's ``recorder`` so each path attributes the spans to its own trace.
+        """
         with recorder.record_span("query embedding (dense)"):
             query_vector = self.embedder.embed_query(request.question)
 
@@ -507,6 +652,26 @@ class RagService:
             logger.info("Reranked to %d hits", len(top_hits), extra=log_extra)
         else:
             top_hits = hits[: self._settings.rerank_top_k]
+        return top_hits
+
+    def query(self, request: QueryRequest) -> QueryResponse:
+        trace_id = get_trace_id() or str(uuid.uuid4())
+        query_start = time.perf_counter()
+        retrieval_mode = "hybrid" if self._settings.sparse_enabled else "dense"
+        log_extra: dict[str, Any] = {
+            "trace_id": trace_id,
+            "query_len": len(request.question),
+            "retrieval_mode": retrieval_mode,
+        }
+        logger.info("Processing query (trace=%s)", trace_id, extra=log_extra)
+        metrics.increment("rag_queries_total", {"mode": retrieval_mode})
+        metrics.observe("rag_query_length_chars", len(request.question), {"mode": retrieval_mode})
+
+        from rag_system.observability_tracing import get_span_recorder
+
+        recorder = get_span_recorder()
+
+        top_hits = self._retrieve(request, recorder, retrieval_mode, log_extra)
 
         with recorder.record_span("answer generation") as answer_span:
             response = self.generator.answer(request.question, top_hits, trace_id)
@@ -557,40 +722,7 @@ class RagService:
         recorder = get_span_recorder()
 
         yield {"type": "status", "stage": "retrieving"}
-        with recorder.record_span("query embedding (dense)"):
-            query_vector = self.embedder.embed_query(request.question)
-        if self._settings.sparse_enabled:
-            with recorder.record_span("query encoding (sparse/BM25)"):
-                sparse_query = self.sparse_encoder.encode_query(request.question)
-        else:
-            sparse_query = None
-
-        retrieval_operation = (
-            "hybrid retrieval (dense+sparse)"
-            if self._settings.sparse_enabled
-            else "dense retrieval"
-        )
-        with recorder.record_span(retrieval_operation) as retrieval_span:
-            hits = self.index.search(
-                query_vector=query_vector,
-                sparse_vector=sparse_query,
-                top_k=self._settings.retrieval_dense_top_k,
-                document_ids=request.document_ids,
-            )
-            recorder.set_retrieval_attributes(
-                retrieval_span,
-                retrieval_mode=retrieval_mode,
-                hit_count=len(hits),
-                top_score=hits[0].score if hits else None,
-            )
-        self._observe_retrieval_quality(hits, retrieval_mode, log_extra)
-
-        reranker = self.reranker
-        if reranker:
-            with recorder.record_span("reranking"):
-                top_hits = reranker.rerank(request.question, hits)
-        else:
-            top_hits = hits[: self._settings.rerank_top_k]
+        top_hits = self._retrieve(request, recorder, retrieval_mode, log_extra)
 
         yield {"type": "status", "stage": "generating"}
         response: QueryResponse | None = None

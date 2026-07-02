@@ -10,6 +10,14 @@ from rag_system.observability import get_logger, retry_on_transient
 logger = get_logger(__name__)
 
 
+class PreconditionFailed(Exception):
+    """Raised when a conditional S3 write fails its ETag precondition.
+
+    Signals that another writer modified the object between our read and write,
+    so the caller should reload the current state and decide whether to retry.
+    """
+
+
 class S3ArtifactStore:
     def __init__(self, settings: Settings):
         self._bucket = settings.s3_bucket
@@ -66,6 +74,83 @@ class S3ArtifactStore:
                 return None
             raise
         return json.loads(response["Body"].read().decode("utf-8"))
+
+    @retry_on_transient()
+    def get_json_with_etag(self, key: str) -> tuple[object | None, str | None]:
+        """Read a JSON object together with its S3 ETag.
+
+        Returns ``(payload, etag)`` on hit and ``(None, None)`` when the object
+        does not exist. The ETag feeds :meth:`put_json_conditional` for
+        optimistic-concurrency writes.
+        """
+        logger.debug("Reading JSON+etag from s3://%s/%s", self._bucket, key, extra={"s3_key": key})
+        try:
+            response = self._client.get_object(Bucket=self._bucket, Key=key)
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code")
+            if error_code in {"NoSuchKey", "404", "NotFound"}:
+                return None, None
+            raise
+        payload = json.loads(response["Body"].read().decode("utf-8"))
+        return payload, response.get("ETag")
+
+    def put_json_conditional(
+        self,
+        key: str,
+        payload: object,
+        *,
+        if_match: str | None = None,
+        if_none_match: bool = False,
+    ) -> None:
+        """Write JSON only if the object's current state matches a precondition.
+
+        - ``if_match``: succeed only if the object's current ETag equals this
+          value (i.e. it has not changed since we read it).
+        - ``if_none_match``: succeed only if the object does not yet exist
+          (create-only).
+
+        Raises :class:`PreconditionFailed` (HTTP 412) when the precondition is
+        not met, so the caller can reload and re-evaluate. Transient errors are
+        retried, but a 412 is deterministic and must not be.
+        """
+        content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        extra: dict[str, str] = {}
+        if if_none_match:
+            extra["IfNoneMatch"] = "*"
+        elif if_match:
+            extra["IfMatch"] = if_match
+        self._put_bytes_conditional(key, content, "application/json", extra)
+
+    @retry_on_transient()
+    def _put_bytes_conditional(
+        self, key: str, content: bytes, content_type: str, conditions: dict[str, str]
+    ) -> None:
+        kwargs = {
+            "Bucket": self._bucket,
+            "Key": key,
+            "Body": content,
+            "ContentType": content_type,
+            "ServerSideEncryption": "aws:kms" if self._kms_key_id else "AES256",
+            **conditions,
+        }
+        if self._kms_key_id:
+            kwargs["SSEKMSKeyId"] = self._kms_key_id
+        try:
+            self._client.put_object(**kwargs)
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code")
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if error_code == "PreconditionFailed" or status == 412:
+                logger.info(
+                    "Conditional S3 write rejected (precondition failed): %s",
+                    key,
+                    extra={"s3_key": key},
+                )
+                raise PreconditionFailed(key) from exc
+            raise
+        logger.debug(
+            "Conditional S3 put complete: %s (%d bytes)", key, len(content), extra={"s3_key": key}
+        )
 
     def put_chunks(self, document_id: str, version: str, chunks: Iterable[Chunk]) -> str:
         lines = [chunk.model_dump_json() for chunk in chunks]
