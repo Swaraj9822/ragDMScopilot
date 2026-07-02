@@ -97,19 +97,22 @@ describe("AnswerCard feedback", () => {
     expect(await screen.findByText(/thanks for the feedback/i)).toBeInTheDocument();
   });
 
-  it("keeps the prompt when the trace is not persisted yet (404) so the user can retry", async () => {
+  it("keeps the prompt after the auto-retries are exhausted (persistent 404) so the user can retry", async () => {
+    // submitFeedback auto-retries a 404 with backoff before giving up, so allow
+    // extra time for the full schedule to elapse.
     captureFeedback(404);
     const user = userEvent.setup();
     renderWithProviders(<AnswerCard response={baseResponse()} elapsedMs={800} />);
 
-    await user.click(screen.getByRole("button", { name: /^helpful$/i }));
+    const helpful = screen.getByRole("button", { name: /^helpful$/i });
+    await user.click(helpful);
 
-    // No confirmation; the control stays interactive for a retry.
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^helpful$/i })).toBeEnabled(),
-    );
+    // The control is disabled while retries are in flight, then re-enables once
+    // they're exhausted — no success confirmation, so the operator can retry.
+    await waitFor(() => expect(helpful).toBeDisabled());
+    await waitFor(() => expect(helpful).toBeEnabled(), { timeout: 8000 });
     expect(screen.queryByText(/thanks for the feedback/i)).not.toBeInTheDocument();
-  });
+  }, 10_000);
 
   it("omits the feedback control when the answer has no trace id", () => {
     renderWithProviders(

@@ -13,22 +13,49 @@ export function checkHealth(): Promise<HealthResponse> {
 }
 
 /**
+ * Backoff schedule (ms) for retrying feedback submission on a transient 404.
+ * The query trace is persisted on a background executor after the answer
+ * returns, so for a short window the backend has no trace to attach feedback
+ * to. These waits (total ~2.1s) comfortably cover that write landing.
+ */
+const FEEDBACK_RETRY_DELAYS_MS = [300, 600, 1200];
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * Submit operator feedback for a completed query, keyed by its trace id.
  *
  * The query trace is persisted off the request path, so immediately after an
- * answer the trace may not be written yet and the backend returns 404. Callers
- * should surface that as a "try again in a moment" message rather than a hard
- * error.
+ * answer the trace may not be written yet and the backend returns 404. Rather
+ * than push that race onto the user, we retry the submission a few times with
+ * backoff; only a 404 that persists past the whole schedule is surfaced (as a
+ * "try again in a moment" message) so the operator can retry by hand.
  */
-export function submitFeedback(
+export async function submitFeedback(
   traceId: string,
   feedback: QueryFeedbackRequest,
+  options: { retryDelaysMs?: number[] } = {},
 ): Promise<QueryFeedbackRecord> {
-  return apiClient.postJson<QueryFeedbackRecord>(
-    `/queries/${encodeURIComponent(traceId)}/feedback`,
-    feedback,
-    { timeoutMs: TIMEOUT_SHORT_MS },
-  );
+  const delays = options.retryDelaysMs ?? FEEDBACK_RETRY_DELAYS_MS;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await apiClient.postJson<QueryFeedbackRecord>(
+        `/queries/${encodeURIComponent(traceId)}/feedback`,
+        feedback,
+        { timeoutMs: TIMEOUT_SHORT_MS },
+      );
+    } catch (err) {
+      // Only the "trace not written yet" race is retriable. Anything else
+      // (validation, auth, server error) propagates immediately.
+      if (err instanceof ApiError && err.status === 404 && attempt < delays.length) {
+        await delay(delays[attempt]);
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 export interface AskParams {
