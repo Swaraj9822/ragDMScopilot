@@ -5,7 +5,10 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Any, Iterator
 
+import sqlglot
 from pydantic import BaseModel, Field
+from sqlglot import exp
+from sqlglot.errors import SqlglotError
 
 from rag_system.config import Settings
 from rag_system.confidence import database_confidence_score
@@ -163,50 +166,168 @@ def load_schema_catalog(settings: Settings) -> CopilotSchemaCatalog:
 
 
 class CopilotSqlGuard:
-    _write_keywords = re.compile(
-        r"\b(insert|update|delete|drop|alter|create|truncate|merge|grant|revoke|copy|call)\b",
-        re.IGNORECASE,
-    )
-    _table_pattern = re.compile(r"\b(?:from|join)\s+([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)?)", re.IGNORECASE)
-    _aggregate_pattern = re.compile(
-        r"\b(count|sum|avg|min|max|string_agg|array_agg|json_agg|bool_and|bool_or)\s*\(",
-        re.IGNORECASE,
-    )
+    """AST-based allowlist for copilot-generated SQL.
+
+    The guard parses the SQL into a syntax tree (via ``sqlglot``) and validates
+    it structurally rather than with surface regexes. Regex table extraction
+    only saw identifiers after ``FROM``/``JOIN`` and never looked at columns, so
+    a comma join to an unlisted table plus a hand-picked column
+    (``SELECT array_agg(u.password_hash) FROM sales_order s, users u``) sailed
+    straight through. The AST guard instead enforces, over the *whole* tree:
+
+    * exactly one statement, and its root is a ``SELECT``;
+    * no write/DDL/administrative nodes, no CTEs, subqueries, set operations,
+      or window functions (which would break the row-collapsing guarantee or
+      open extra, hard-to-analyse namespaces);
+    * no ``SELECT *`` / ``table.*`` projection;
+    * at least one aggregate function (so raw detail rows are never returned);
+    * every referenced table — including comma-joined ones — is on the catalog
+      allowlist;
+    * every referenced column resolves to an approved column on an approved
+      table (qualified columns must match the aliased table; unqualified ones
+      must exist on some referenced table or be a projection alias).
+
+    Row limits are still clamped/appended on the original text so the returned
+    SQL keeps the model's formatting.
+    """
+
     _limit_pattern = re.compile(r"\blimit\s+(\d+)\b", re.IGNORECASE)
+
+    # Nodes that must never appear anywhere in the tree. Data-modifying and
+    # administrative statements can only reach a SELECT root by hiding inside a
+    # CTE/subquery, so rejecting those namespaces also blocks nested DML.
+    _FORBIDDEN_NODES: tuple[type[exp.Expression], ...] = (
+        exp.Insert,
+        exp.Update,
+        exp.Delete,
+        exp.Drop,
+        exp.Create,
+        exp.Command,  # sqlglot parses COPY/CALL/GRANT/VACUUM/etc. as Command
+        exp.Merge,
+        exp.Window,  # window aggregates do not collapse rows -> raw detail leak
+        exp.With,  # CTEs (incl. data-modifying WITH ... AS (DELETE ...))
+        exp.Subquery,  # derived tables / scalar subqueries -> extra namespaces
+        exp.Union,  # covers UNION / EXCEPT / INTERSECT (subclasses of Union)
+    )
 
     def __init__(self, catalog: CopilotSchemaCatalog, max_rows: int):
         self._catalog = catalog
         self._max_rows = max_rows
 
+    def _parse(self, sql: str) -> exp.Select:
+        try:
+            statements = [s for s in sqlglot.parse(sql, read="postgres") if s is not None]
+        except SqlglotError as exc:
+            raise SqlValidationError(f"Could not parse SQL: {exc}") from exc
+        if len(statements) != 1:
+            raise SqlValidationError("Only one SQL statement is allowed.")
+        statement = statements[0]
+        if not isinstance(statement, exp.Select):
+            raise SqlValidationError("Only SELECT queries are allowed.")
+        return statement
+
     def validate(self, sql: str) -> str:
         # Strip comments first (string-literal aware) so a hidden ";" or write
-        # keyword inside a comment cannot slip past the checks below.
+        # keyword inside a comment cannot slip past the checks below, then parse.
         sql = _strip_sql_comments(sql).strip().rstrip(";").strip()
         if not sql:
             raise SqlValidationError("SQL is empty.")
-        if ";" in sql:
-            raise SqlValidationError("Only one SQL statement is allowed.")
-        if not re.match(r"^\s*select\b", sql, re.IGNORECASE):
-            raise SqlValidationError("Only SELECT queries are allowed.")
-        if self._write_keywords.search(sql):
-            raise SqlValidationError("Write or administrative SQL is not allowed.")
-        if re.search(r"\bselect\s+\*", sql, re.IGNORECASE):
-            raise SqlValidationError("SELECT * is not allowed; select explicit columns.")
-        if not self._aggregate_pattern.search(sql):
+
+        statement = self._parse(sql)
+
+        if next(statement.find_all(*self._FORBIDDEN_NODES), None) is not None:
+            raise SqlValidationError(
+                "Write, administrative, subquery, CTE, set-operation, and window "
+                "SQL is not allowed."
+            )
+
+        self._reject_star(statement)
+
+        if next(statement.find_all(exp.AggFunc), None) is None:
             raise SqlValidationError("SQL must aggregate results to protect the database.")
 
-        table_names = self._extract_table_names(sql)
-        if not table_names:
+        alias_to_table, referenced_tables = self._resolve_tables(statement)
+        if not referenced_tables:
             raise SqlValidationError("Query must read from at least one approved table.")
-        unknown_tables = sorted(name for name in table_names if name.lower() not in self._catalog.table_names)
+        unknown_tables = sorted(
+            name for name in referenced_tables if name not in self._catalog.table_names
+        )
         if unknown_tables:
             raise SqlValidationError(f"Unapproved table(s): {', '.join(unknown_tables)}")
 
+        self._validate_columns(statement, alias_to_table, referenced_tables)
+
+        return self._apply_limit(sql, statement)
+
+    @staticmethod
+    def _reject_star(statement: exp.Select) -> None:
+        """Reject ``SELECT *`` / ``t.*`` projections (but allow ``count(*)``)."""
+        for select in statement.find_all(exp.Select):
+            for projection in select.expressions:
+                target = projection.this if isinstance(projection, exp.Alias) else projection
+                if isinstance(target, exp.Star) or (
+                    isinstance(target, exp.Column) and isinstance(target.this, exp.Star)
+                ):
+                    raise SqlValidationError(
+                        "SELECT * is not allowed; select explicit columns."
+                    )
+
+    def _resolve_tables(self, statement: exp.Expression) -> tuple[dict[str, str], set[str]]:
+        """Map every table alias/name to its real table and collect table names.
+
+        Both are lowercased. Comma-joined tables are ordinary ``Table`` nodes,
+        so they are captured here just like ``JOIN`` targets — closing the hole
+        where a comma join smuggled an unlisted table past the old regex.
+        """
+        alias_to_table: dict[str, str] = {}
+        referenced: set[str] = set()
+        for table in statement.find_all(exp.Table):
+            real = table.name.lower()
+            referenced.add(real)
+            alias_to_table[(table.alias or table.name).lower()] = real
+        return alias_to_table, referenced
+
+    def _validate_columns(
+        self,
+        statement: exp.Expression,
+        alias_to_table: dict[str, str],
+        referenced_tables: set[str],
+    ) -> None:
+        output_aliases = {
+            alias.alias.lower() for alias in statement.find_all(exp.Alias) if alias.alias
+        }
+        for column in statement.find_all(exp.Column):
+            name = column.name.lower()
+            qualifier = column.table.lower()
+            if qualifier:
+                real = alias_to_table.get(qualifier)
+                if real is None:
+                    raise SqlValidationError(f"Unknown table qualifier: {column.table}")
+                if name not in self._catalog.column_names_for(real):
+                    raise SqlValidationError(
+                        f"Unapproved column: {column.table}.{column.name}"
+                    )
+            elif name in output_aliases:
+                # A reference to a projection alias (e.g. GROUP BY/ORDER BY on
+                # "AS revenue"); not a base-table column.
+                continue
+            elif not any(
+                name in self._catalog.column_names_for(table) for table in referenced_tables
+            ):
+                raise SqlValidationError(f"Unapproved column: {column.name}")
+
+    def _apply_limit(self, sql: str, statement: exp.Select) -> str:
+        """Clamp/append the row limit on the original text.
+
+        Operating on the model's text (rather than re-serialising the AST) keeps
+        the returned SQL byte-stable apart from the limit. A GROUP BY query with
+        no LIMIT gets one appended; an oversized literal LIMIT is clamped.
+        """
         limit = self._limit_pattern.search(sql)
         if limit and int(limit.group(1)) > self._max_rows:
-            sql = self._limit_pattern.sub(f"LIMIT {self._max_rows}", sql, count=1)
-        elif not limit and re.search(r"\bgroup\s+by\b", sql, re.IGNORECASE):
-            sql = f"{sql}\nLIMIT {self._max_rows}"
+            return self._limit_pattern.sub(f"LIMIT {self._max_rows}", sql, count=1)
+        if not limit and statement.args.get("group") is not None:
+            return f"{sql}\nLIMIT {self._max_rows}"
         return sql
 
     def data_sources(self, sql: str) -> list[CopilotDataSource]:
@@ -221,11 +342,12 @@ class CopilotSqlGuard:
         return sources
 
     def _extract_table_names(self, sql: str) -> set[str]:
-        names = set()
-        for match in self._table_pattern.finditer(sql):
-            raw_name = match.group(1)
-            names.add(raw_name.split(".")[-1])
-        return names
+        try:
+            statement = self._parse(sql)
+        except SqlValidationError:
+            return set()
+        _alias_to_table, referenced = self._resolve_tables(statement)
+        return referenced
 
 
 class PostgresCopilotExecutor:

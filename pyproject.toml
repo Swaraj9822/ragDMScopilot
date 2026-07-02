@@ -20,6 +20,7 @@ dependencies = [
   "pydantic-settings>=2.3.0",
   "pyjwt>=2.8.0",
   "python-multipart>=0.0.9",
+  "sqlglot>=25.0.0",
   "tenacity>=8.2.0",
   "uvicorn[standard]>=0.30.0",
 

@@ -12,7 +12,7 @@ from rag_system.observability import (
 )
 from rag_system.observability_tracing import get_span_recorder
 from rag_system.queue import ReceivedIngestionJob, SqsIngestionQueue
-from rag_system.service import DocumentDeletedError, RagService
+from rag_system.service import DocumentDeletedError, RagService, StaleIngestionError
 
 logger = get_logger(__name__)
 
@@ -116,6 +116,17 @@ class IngestionWorker:
             metrics.increment("rag_ingestion_jobs_skipped_deleted_total")
             logger.info(
                 "Ingestion job skipped: document already deleted",
+                extra={"document_id": job.document_id, "version": job.version},
+            )
+        except StaleIngestionError:
+            # A newer upload superseded this job's version, so it can never
+            # produce the current document. Treat it as a successful no-op:
+            # delete the message so a stale version does not redeliver and pile
+            # up in the DLQ. The newer version's own job indexes the document.
+            self._queue.delete(message)
+            metrics.increment("rag_ingestion_jobs_skipped_superseded_total")
+            logger.info(
+                "Ingestion job skipped: superseded by a newer document version",
                 extra={"document_id": job.document_id, "version": job.version},
             )
         except Exception:

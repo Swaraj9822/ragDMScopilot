@@ -21,6 +21,13 @@ class DocumentRecord(BaseModel):
     s3_uri: str
     status: DocumentStatus
     error: str | None = None
+    #: The version whose vectors are currently published (searchable). It is set
+    #: atomically only after a full ingestion succeeds, so partial/in-flight
+    #: vectors of a different version are never treated as searchable. ``None``
+    #: means nothing has been published yet (first ingestion in flight). Records
+    #: written before this field existed fall back to ``version`` when their
+    #: status is ``indexed`` (see ``RagService._active_version_for``).
+    active_version: str | None = None
 
 
 class ParsedDocument(BaseModel):

@@ -17,6 +17,8 @@ from rag_system import api as api_module
 from rag_system.models import (
     Chunk,
     Citation,
+    DocumentRecord,
+    DocumentStatus,
     QueryRequest,
     QueryResponse,
     RetrievalHit,
@@ -121,6 +123,18 @@ def _stream_service() -> tuple[RagService, _Index]:
     service._index = index
     service._reranker = None
     service._generator = _Generator()
+    # The retrieval gate consults the document record for its published version;
+    # cache an indexed record so the fake hit (version "v") is kept.
+    service._documents = {
+        "doc": DocumentRecord(
+            id="doc",
+            title="doc.pdf",
+            version="v",
+            s3_uri="s3://bucket/doc",
+            status=DocumentStatus.indexed,
+            active_version="v",
+        )
+    }
     # Trace persistence is off-path and irrelevant to this test.
     service._persist_query_trace_async = lambda **kwargs: None  # type: ignore[method-assign]
     return service, index

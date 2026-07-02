@@ -70,6 +70,80 @@ def test_sql_guard_rejects_unsafe_sql(sql: str) -> None:
         guard.validate(sql)
 
 
+def test_sql_guard_rejects_comma_joined_unapproved_table() -> None:
+    # The P0 bypass: the old regex only validated identifiers after FROM/JOIN,
+    # so a comma-joined unapproved table (here "users") slipped through and its
+    # columns could be exfiltrated via an aggregate.
+    guard = CopilotSqlGuard(_catalog(), max_rows=50)
+
+    with pytest.raises(SqlValidationError):
+        guard.validate(
+            "select array_agg(u.secret) from sales_invoice s, users u"
+        )
+
+
+def test_sql_guard_rejects_unapproved_column_on_approved_table() -> None:
+    # Columns were never validated before; an approved table must not expose
+    # columns absent from the catalog.
+    guard = CopilotSqlGuard(_catalog(), max_rows=50)
+
+    with pytest.raises(SqlValidationError):
+        guard.validate("select max(ssn) as x from sales_invoice")
+
+
+def test_sql_guard_rejects_unknown_qualifier() -> None:
+    guard = CopilotSqlGuard(_catalog(), max_rows=50)
+
+    with pytest.raises(SqlValidationError):
+        guard.validate("select sum(bogus.net_amount) as revenue from sales_invoice")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # Window functions do not collapse rows -> raw-detail leak.
+        "select sum(net_amount) over (partition by party_id) as r from sales_invoice",
+        # CTEs open an extra namespace the guard refuses to reason about.
+        "with t as (select net_amount from sales_invoice) select sum(net_amount) as r from t",
+        # Derived tables / subqueries likewise.
+        "select sum(net_amount) as r from sales_invoice where party_id in (select id from party)",
+        # Set operations.
+        "select sum(net_amount) as r from sales_invoice union select sum(net_amount) as r from sales_invoice",
+    ],
+)
+def test_sql_guard_rejects_unanalyzable_constructs(sql: str) -> None:
+    guard = CopilotSqlGuard(_catalog(), max_rows=50)
+
+    with pytest.raises(SqlValidationError):
+        guard.validate(sql)
+
+
+def test_sql_guard_allows_qualified_columns_across_join() -> None:
+    guard = CopilotSqlGuard(_catalog(), max_rows=50)
+
+    sql = guard.validate(
+        "select p.name, sum(s.net_amount) as revenue "
+        "from sales_invoice s join party p on s.party_id = p.id "
+        "group by p.name"
+    )
+
+    assert "LIMIT 50" in sql
+
+
+def test_data_sources_lists_comma_joined_tables() -> None:
+    # The old regex missed comma-joined tables in data_sources too; the AST
+    # extractor reports every approved table the query touches.
+    guard = CopilotSqlGuard(_catalog(), max_rows=50)
+
+    sql = guard.validate(
+        "select sum(s.net_amount) as revenue "
+        "from sales_invoice s, party p where s.party_id = p.id"
+    )
+    tables = {source.table for source in guard.data_sources(sql)}
+
+    assert tables == {"sales_invoice", "party"}
+
+
 def test_strip_sql_comments_handles_nested_block_comments() -> None:
     # Postgres block comments nest. The stripper must consume the whole nested
     # comment, leaving no dangling */ remnant.

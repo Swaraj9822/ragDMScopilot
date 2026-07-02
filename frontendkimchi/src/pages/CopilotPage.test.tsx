@@ -128,6 +128,64 @@ describe("CopilotPage", () => {
     expect(screen.getByText("bad question")).toBeInTheDocument();
   });
 
+  it("clears the selected documents via New session so later requests are unconstrained", async () => {
+    localStorage.setItem(
+      LOCALSTORAGE_KEYS.selectedDocuments,
+      JSON.stringify({ v: 1, ids: ["doc-123"] }),
+    );
+
+    let captured: { document_ids: string[] | null } | null = null;
+    server.use(
+      http.post(`${API}/ask/stream`, async ({ request }) => {
+        captured = (await request.json()) as typeof captured;
+        return streamHandler(baseResponse());
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<CopilotPage />, { route: "/copilot" });
+
+    // The active document constraint is visible in the context rail.
+    expect(
+      screen.getByRole("button", { name: /remove document doc-123/i }),
+    ).toBeInTheDocument();
+
+    // Start a new session and confirm — this clears the selection too.
+    await user.click(screen.getByRole("button", { name: /new session/i }));
+    await user.click(screen.getByRole("button", { name: /clear session/i }));
+
+    expect(
+      screen.queryByRole("button", { name: /remove document doc-123/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/no documents selected/i)).toBeInTheDocument();
+
+    // A subsequent question is no longer constrained to the old selection.
+    await user.type(screen.getByLabelText(/ask about your documents/i), "anything?");
+    await user.click(screen.getByRole("button", { name: /send question/i }));
+
+    await waitFor(() => expect(captured).not.toBeNull());
+    expect(captured!.document_ids ?? []).toHaveLength(0);
+  });
+
+  it("removes a single selected document from the context rail", async () => {
+    localStorage.setItem(
+      LOCALSTORAGE_KEYS.selectedDocuments,
+      JSON.stringify({ v: 1, ids: ["doc-1", "doc-2"] }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<CopilotPage />, { route: "/copilot" });
+
+    await user.click(screen.getByRole("button", { name: /remove document doc-1/i }));
+
+    expect(
+      screen.queryByRole("button", { name: /remove document doc-1/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /remove document doc-2/i }),
+    ).toBeInTheDocument();
+  });
+
   it("preserves the draft and shows the backend detail on HTTP 400", async () => {
     server.use(
       http.post(`${API}/ask/stream`, () =>

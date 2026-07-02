@@ -111,10 +111,19 @@ class PostgresRefreshTokenStore:
                 row = cur.fetchone()
         return _row_to_record(row) if row else None
 
-    def revoke(self, token_id: str) -> None:
+    def revoke(self, token_id: str) -> bool:
+        """Revoke a single token, returning whether this call actually revoked it.
+
+        The ``WHERE id = %s AND revoked_at IS NULL`` predicate makes this an
+        atomic compare-and-set: under concurrent refreshes of the *same* token,
+        exactly one ``UPDATE`` flips the row (``rowcount == 1``) and every other
+        sees ``rowcount == 0``. Callers use this to ensure only the winner of the
+        race issues a successor token pair.
+        """
         with self._connection_factory() as conn:
             with conn.cursor() as cur:
                 cur.execute(_REVOKE_SQL, (token_id,))
+                return cur.rowcount == 1
 
     def revoke_all_for_user(self, user_id: str) -> int:
         with self._connection_factory() as conn:

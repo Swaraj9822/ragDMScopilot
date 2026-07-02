@@ -6,6 +6,7 @@ import { useSelectedDocuments } from "../hooks/useSelectedDocuments";
 import { useToast } from "../hooks/useToast";
 import { Composer } from "../components/copilot/Composer";
 import { ConversationView } from "../components/copilot/ConversationView";
+import { ContextRail } from "../components/copilot/ContextRail";
 import { ExamplePrompts } from "../components/copilot/ExamplePrompts";
 import { ConfirmDialog } from "../components/common/ConfirmDialog";
 import styles from "./CopilotPage.module.css";
@@ -41,8 +42,9 @@ function describeError(error: unknown): CopilotError {
 }
 
 export default function CopilotPage() {
-  const { exchanges, append, clear } = useCopilotHistory();
-  const { ids: selectedIds } = useSelectedDocuments();
+  const { exchanges, append, clear: clearHistory } = useCopilotHistory();
+  const { ids: selectedIds, remove: removeSelected, clear: clearSelected } =
+    useSelectedDocuments();
   const { pushToast } = useToast();
 
   const [draft, setDraft] = useState("");
@@ -175,13 +177,21 @@ export default function CopilotPage() {
         </div>
       </div>
 
+      <ContextRail
+        selectedIds={selectedIds}
+        onRemove={removeSelected}
+        historyCount={exchanges.length}
+        onNewSession={() => setConfirmClear(true)}
+      />
+
       <ConfirmDialog
         open={confirmClear}
         title="Start a new session?"
-        body="This clears the local question and answer history in this browser. It does not affect the backend."
-        confirmLabel="Clear history"
+        body="This clears the local question and answer history and the selected documents in this browser. It does not affect the backend."
+        confirmLabel="Clear session"
         onConfirm={() => {
-          clear();
+          clearHistory();
+          clearSelected();
           setPendingQuestion(null);
           setError(null);
           setConfirmClear(false);

@@ -70,12 +70,18 @@ class AuthService:
         permitted: once any user exists, further registration raises
         :class:`RegistrationClosedError`.
         """
-        if not self._settings.auth_allow_registration and self._store.has_users():
-            raise RegistrationClosedError(
-                "Self-service registration is disabled."
-            )
-        record = self._store.create_user(email, hash_password(password))
-        return record
+        if not self._settings.auth_allow_registration:
+            # Registration is closed: only the bootstrap account may be created,
+            # and only once. create_bootstrap_user does the empty-table check and
+            # the insert atomically, so two concurrent first-registrations cannot
+            # both succeed (the check-then-act race in the old has_users() gate).
+            record = self._store.create_bootstrap_user(email, hash_password(password))
+            if record is None:
+                raise RegistrationClosedError(
+                    "Self-service registration is disabled."
+                )
+            return record
+        return self._store.create_user(email, hash_password(password))
 
     def authenticate(self, email: str, password: str) -> UserRecord:
         """Return the matching active user or raise.
@@ -133,8 +139,18 @@ class AuthService:
         if user is None or not user.is_active:
             raise InvalidRefreshTokenError("Account is unavailable.")
 
-        # Rotate: revoke the presented token, then issue a new pair.
-        self._refresh_store.revoke(record.id)
+        # Rotate: atomically revoke the presented token, and only issue a new
+        # pair if THIS call is the one that revoked it. Under concurrent
+        # refreshes of the same token, the conditional UPDATE lets exactly one
+        # caller win; the losers revoke nothing and must not mint a successor,
+        # otherwise a single refresh token would yield multiple valid families.
+        if not self._refresh_store.revoke(record.id):
+            logger.warning(
+                "Refresh token was revoked concurrently; refusing to issue a "
+                "second successor",
+                extra={"user_id": user.id},
+            )
+            raise InvalidRefreshTokenError("Refresh token has been revoked.")
         pair = self._issue_token_pair(user)
         logger.info("Rotated refresh token", extra={"user_id": user.id})
         return pair

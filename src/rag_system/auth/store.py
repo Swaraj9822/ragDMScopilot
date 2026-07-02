@@ -41,6 +41,23 @@ _SELECT_BY_ID_SQL = f"SELECT {_COLUMNS} FROM users WHERE id = %s"
 
 _SELECT_ANY_USER_SQL = "SELECT 1 FROM users LIMIT 1"
 
+# Arbitrary constant key for the transaction-scoped advisory lock that
+# serialises bootstrap-account creation (see create_bootstrap_user).
+_BOOTSTRAP_LOCK_KEY = 0x1A9B_C0DE
+
+_ADVISORY_XACT_LOCK_SQL = "SELECT pg_advisory_xact_lock(%s)"
+
+# Insert the account only while the table is still empty. Combined with the
+# advisory lock above, this makes "create the first (bootstrap) account" atomic:
+# a concurrent attempt blocks on the lock, then finds the row already present
+# and inserts nothing (RETURNING yields zero rows).
+_INSERT_BOOTSTRAP_SQL = f"""
+    INSERT INTO users (id, email, password_hash, is_active, created_at)
+    SELECT %s, %s, %s, %s, %s::timestamptz
+    WHERE NOT EXISTS (SELECT 1 FROM users)
+    RETURNING {_COLUMNS}
+"""
+
 
 class EmailAlreadyExistsError(Exception):
     """Raised when registering an email that already has an account."""
@@ -84,6 +101,31 @@ class PostgresUserStore:
                 raise EmailAlreadyExistsError(email) from exc
             raise
         logger.info("Registered user", extra={"user_id": user_id})
+        return _row_to_user(row)
+
+    def create_bootstrap_user(self, email: str, password_hash: str) -> UserRecord | None:
+        """Atomically create the first account, or return ``None`` if one exists.
+
+        Used when self-service registration is disabled: only the bootstrap
+        account may be created. A transaction-scoped advisory lock serialises
+        concurrent attempts, and the conditional insert (``WHERE NOT EXISTS``)
+        guarantees a second racer inserts nothing and gets ``None`` — closing the
+        check-then-act race in ``AuthService.register`` where two concurrent
+        first-registrations could both create an account.
+        """
+        user_id = str(uuid.uuid4())
+        created_at = datetime.now(timezone.utc)
+        with self._connection_factory() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_ADVISORY_XACT_LOCK_SQL, (_BOOTSTRAP_LOCK_KEY,))
+                cur.execute(
+                    _INSERT_BOOTSTRAP_SQL,
+                    (user_id, email, password_hash, True, created_at.isoformat()),
+                )
+                row = cur.fetchone()
+        if row is None:
+            return None
+        logger.info("Registered bootstrap user", extra={"user_id": user_id})
         return _row_to_user(row)
 
     def get_by_email(self, email: str) -> UserRecord | None:

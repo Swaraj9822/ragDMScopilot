@@ -319,7 +319,10 @@ def test_update_document_keeps_id_queues_new_version_and_replaces_vectors(monkey
     assert updated["title"] == "updated.pdf"
     assert updated["status"] == DocumentStatus.queued
     assert updated["version"] != first_version
-    assert index.deleted_document_ids == [document_id]
+    # Replacement no longer pre-deletes the old vectors: the previously
+    # published version stays searchable until the new version is fully ingested
+    # and atomically published (then superseded vectors are cleaned up).
+    assert index.deleted_document_ids == []
 
     processed = asyncio.run(IngestionWorker(service, queue).process_once())
 

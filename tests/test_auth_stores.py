@@ -102,6 +102,21 @@ def test_has_users_reflects_population():
     assert store.has_users() is True
 
 
+def test_create_bootstrap_user_creates_when_table_empty():
+    store, _ = _user_store()
+    record = store.create_bootstrap_user("first@example.com", "h")
+    assert record is not None and record.email == "first@example.com"
+    assert store.get_by_id(record.id) is not None
+
+
+def test_create_bootstrap_user_returns_none_when_table_not_empty():
+    store, _ = _user_store()
+    store.create_user("existing@example.com", "h")
+    # The conditional insert affects no rows, so no second account is created.
+    assert store.create_bootstrap_user("second@example.com", "h") is None
+    assert store.get_by_email("second@example.com") is None
+
+
 # --- PostgresRefreshTokenStore ---------------------------------------------
 
 
@@ -129,6 +144,16 @@ def test_refresh_revoke_marks_single_token():
     created = store.create("user-1", "hash-abc", expires)
     store.revoke(created.id)
     assert store.get_by_hash("hash-abc").is_revoked is True
+
+
+def test_refresh_revoke_is_atomic_cas_returning_true_then_false():
+    # The conditional UPDATE reports it revoked exactly once; a repeat (e.g. a
+    # concurrent refresh of the same token) reports False and issues nothing.
+    store, _ = _refresh_store()
+    expires = datetime.now(timezone.utc) + timedelta(days=30)
+    created = store.create("user-1", "hash-abc", expires)
+    assert store.revoke(created.id) is True
+    assert store.revoke(created.id) is False
 
 
 def test_refresh_revoke_all_for_user_counts_only_active():

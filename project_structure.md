@@ -94,17 +94,17 @@ process: `python -m rag_system.worker`.
 |---|---|
 | `api.py` | FastAPI app: lifespan wiring, middleware (CORS, trace id), and all HTTP routes for documents, queries, ask/stream, traces, and logs. Mounts the auth router and starts flush workers + retention scheduler. |
 | `config.py` | `Settings` (pydantic-settings) loaded from `.env`; AWS/Pinecone/Gemini config, boto3 session/client factories. `get_settings()` is cached. |
-| `models.py` | Core pydantic domain models: `DocumentRecord`, `DocumentStatus`, `QueryRequest/Response`, `UnifiedQuery*`, `Citation`, `RetrievalHit`, feedback + trace records. |
-| `service.py` | `RagService` — orchestrates ingestion (parse→chunk→embed→index) and single-pipeline document Q&A; off-request-path query-trace persistence via a bounded thread pool. |
+| `models.py` | Core pydantic domain models: `DocumentRecord` (incl. `active_version`, the atomically-published searchable version), `DocumentStatus`, `QueryRequest/Response`, `UnifiedQuery*`, `Citation`, `Chunk`/`RetrievalHit` (version-tagged), feedback + trace records. |
+| `service.py` | `RagService` — orchestrates ingestion (parse→chunk→embed→index) and single-pipeline document Q&A; off-request-path query-trace persistence via a bounded thread pool. Ingestion is **versioned and atomically published**: a new version's vectors become searchable only when the record's `active_version` flips, retrieval filters hits to the active version, and superseded/failed versions are garbage-collected. Stale writes from replaced versions raise `StaleIngestionError`; deleted-doc writes raise `DocumentDeletedError` (record writes use S3 compare-and-set). |
 | `router.py` | Agentic **query router**: classifies a query as `rag`, `database`, or `hybrid`; fans out and blends results; produces `UnifiedQueryResponse`. |
 | `parsing.py` | `DocumentParserRouter` — multi-format parsing (LlamaParse for PDF/DOCX/PPTX/images; native handling for XLSX/CSV/HTML/TXT/MD). |
 | `chunking.py` | `DocumentChunker` — token-based sentence chunking via LlamaIndex `SentenceSplitter`. |
 | `embedding.py` | `BedrockTitanEmbedder` — embeds chunks with Titan Embed Text V2 on Bedrock. |
 | `sparse.py` | `BM25SparseEncoder` — BM25 sparse vectors (MS MARCO) for hybrid lexical matching. |
-| `retrieval.py` | `PineconeHybridIndex` — upsert + hybrid (dense + sparse) query against Pinecone. |
+| `retrieval.py` | `PineconeHybridIndex` — upsert + hybrid (dense + sparse) query against Pinecone; version-scoped deletes (`delete_document_version` / `delete_document_except_version`) support atomic-publication cleanup of superseded/partial vectors. |
 | `rerank.py` | `BedrockCohereReranker` — reranks hits with Cohere Rerank 3.5. |
-| `generation.py` | `GroundedAnswerGenerator` — Gemini-backed grounded answer generation with citations; streaming contract uses a `###META###` marker separating prose from trailing JSON. |
-| `copilot.py` | `DatabaseCopilotService` — text-to-SQL copilot; validates generated SQL (`SqlValidationError`), runs against the business DB, returns rows. Uses the schema catalog in `config/`. |
+| `generation.py` | `GroundedAnswerGenerator` — Gemini-backed grounded answer generation with citations; streaming contract uses a `###META###` marker separating prose from trailing JSON. **Fails closed** on unparseable model output: keeps the prose but attaches no citations and marks evidence insufficient rather than crediting every retrieved chunk. |
+| `copilot.py` | `DatabaseCopilotService` + `CopilotSqlGuard` — text-to-SQL copilot. The guard is an **AST-based allowlist** (parses SQL with `sqlglot`) that enforces a single read-only aggregating `SELECT`, rejects writes/DDL/CTEs/subqueries/set-ops/window functions, and checks every referenced table *and* column against the schema catalog; invalid SQL raises `SqlValidationError`. Runs approved SQL against the business DB and returns rows. Uses the schema catalog in `config/`. |
 | `llm.py` | `TextLLM` protocol + `build_text_llm()` — single Gemini/Vertex abstraction shared by generation, routing, and copilot. |
 | `confidence.py` | Deterministic numeric confidence scoring (`[0,1]`) from explainable signals (grounding, logprobs); helpers for RAG, database, and combined scores. |
 | `evaluation.py` | Golden-set evaluation harness: `GoldenCase` model + scoring against `tests/golden/rag_golden_set.json`. |
@@ -122,11 +122,11 @@ Self-managed JWT authentication backed by a Postgres `users` table.
 |---|---|
 | `__init__.py` | Public surface: `router`, `get_current_user`, `apply_schema`, `AuthService`, request/response models. |
 | `router.py` | Routes: `/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/me`. |
-| `service.py` | `AuthService` — registration / login / lookup orchestration. |
+| `service.py` | `AuthService` — registration / login / lookup orchestration + refresh-token rotation. Bootstrap registration and token rotation are race-safe: only the winner of a concurrent same-token refresh mints a successor pair. |
 | `models.py` | `LoginRequest`, `RegisterRequest`, `TokenResponse`, `UserPublic`. |
 | `schema.py` | Idempotent `users` table setup, run at startup (`apply_schema`). |
-| `store.py` | Postgres user store (persistence). |
-| `refresh_store.py` | Refresh-token persistence / rotation. |
+| `store.py` | Postgres user store (persistence); `create_bootstrap_user` atomically creates the first account (advisory lock + `WHERE NOT EXISTS` insert) so registration cannot be raced open when self-service is disabled. |
+| `refresh_store.py` | Refresh-token persistence / rotation; `revoke` is an atomic compare-and-set (`WHERE ... revoked_at IS NULL`) returning whether *this* call won the revoke. |
 | `passwords.py` | Bcrypt password hashing/verification. |
 | `tokens.py` | JWT encode/decode (access + refresh). |
 | `dependencies.py` | FastAPI dependencies: `get_auth_service`, `get_current_user`. |
@@ -239,7 +239,9 @@ Shared fixtures/doubles: `conftest.py`, `auth_doubles.py`,
 Broad coverage groups (property-based tests are suffixed `_properties`):
 - **Pipeline**: `test_chunking`, `test_parsing`, `test_generation`,
   `test_confidence`, `test_storage`, `test_router`, `test_copilot`,
-  `test_rate_limit`, `test_worker`, `test_service_document_records`.
+  `test_rate_limit`, `test_worker`, `test_service_document_records`,
+  `test_index_publication` (atomic version publication + cleanup),
+  `test_document_record_race` (delete/ingest CAS races), `test_p3_cleanup`.
 - **Auth**: `test_auth_{models,passwords,tokens,schema,service,stores,router,dependencies}`.
 - **Observability/tracing**: span lifecycle/hierarchy, sampling, buffers,
   context propagation, trace/log stores, retention, serialization,
@@ -341,6 +343,16 @@ Deployment runbook and GCP setup: `DEPLOY.md`, `gcp_setup.md`, `vm_setup.sh`.
   is off or a trace is unsampled (best-effort, never on the request's hot path).
 - **Confidence**: every user-facing answer carries a deterministic numeric
   `confidence_score` in `[0,1]` alongside categorical `evidence_status`.
+- **Ingestion versioning**: each upload/replacement stamps a content-hash
+  `version`; vectors carry it in their metadata. A version is only "published"
+  (searchable) when `DocumentRecord.active_version` flips atomically after a
+  successful ingest, so a failed/superseded re-ingest never destroys the last
+  good version and readers only ever see published vectors. Record writes are
+  guarded by S3 compare-and-set against deleted-resurrection and stale-version
+  clobbering.
+- **Fail closed**: security- and grounding-sensitive paths refuse rather than
+  guess — the SQL guard rejects anything it cannot prove safe, and unparseable
+  LLM output yields no citations instead of unverified "grounded" prose.
 - **Style**: backend line length 100, ruff target `py311`; `.kiro`, `.agents`,
   `frontendkimchi` are excluded from ruff. Frontend uses CSS Modules and a
   typed API layer.

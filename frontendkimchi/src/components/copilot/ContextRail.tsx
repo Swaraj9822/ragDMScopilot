@@ -57,7 +57,7 @@ export function ContextRail({
           type="button"
           className="btn btn-sm"
           onClick={onNewSession}
-          disabled={historyCount === 0}
+          disabled={historyCount === 0 && selectedIds.length === 0}
         >
           New session
         </button>

@@ -72,6 +72,34 @@ class DocumentDeletedError(RuntimeError):
         self.document_id = document_id
 
 
+class StaleIngestionError(RuntimeError):
+    """Raised when an ingestion write targets a superseded document version.
+
+    Every upload/replacement stamps the record with a new content-hash version.
+    While version A is being ingested, a newer upload B replaces the stored
+    record (status ``queued``, version B). Any later progress/terminal write
+    from A (``parsing``..``indexed``/``failed``) would otherwise clobber B's
+    record with A's stale version — and B's own job would then read the wrong
+    version, fail its version check, and churn to the DLQ.
+
+    Refusing the stale write with this error keeps B's record intact and lets
+    the worker treat A as a completed no-op. It is also raised up front when a
+    job's version no longer matches the current record, so an already-superseded
+    job is dropped cleanly instead of being retried to the DLQ.
+    """
+
+    def __init__(
+        self, document_id: str, attempted_version: str, current_version: str | None
+    ) -> None:
+        super().__init__(
+            f"Document {document_id} ingestion for version {attempted_version} "
+            f"is stale; current stored version is {current_version}"
+        )
+        self.document_id = document_id
+        self.attempted_version = attempted_version
+        self.current_version = current_version
+
+
 # Bounded pool for best-effort, off-request-path query-trace persistence. A
 # fixed worker count caps concurrent background writes instead of spawning one
 # unbounded thread per query under load; trace writes are short S3 puts, so a
@@ -162,8 +190,11 @@ class RagService:
         if current is None or current.status == DocumentStatus.deleted:
             return None
 
-        with timed(logger, "Pinecone document delete before update", document_id=document_id):
-            await asyncio.to_thread(self.index.delete_document, document_id)
+        # Do NOT delete the current vectors here. The previously published
+        # version must stay searchable until the replacement is fully ingested
+        # and atomically published; the new ingestion cleans up superseded
+        # vectors only after it switches the active version. Pre-deleting left a
+        # gap where a failed replacement destroyed the last good version.
         return await self._queue_document(document_id, filename, content)
 
     def delete_document(self, document_id: str) -> DocumentRecord | None:
@@ -197,12 +228,22 @@ class RagService:
         s3_uri = await asyncio.to_thread(
             self._store.put_raw, document_id, version, filename, content
         )
+        # Preserve the currently published version across a replacement so the
+        # existing vectors stay searchable while the new version ingests. A
+        # brand-new document has no prior record and therefore no active version.
+        # The lookup is skipped for write-only stores (minimal test doubles);
+        # real S3 always supports reads, and a fresh upload has nothing to carry.
+        existing = None
+        if hasattr(self._store, "get_json"):
+            existing = await asyncio.to_thread(self.get_document, document_id)
+        active_version = self._published_version_of(existing)
         record = DocumentRecord(
             id=document_id,
             title=filename,
             version=version,
             s3_uri=s3_uri,
             status=DocumentStatus.queued,
+            active_version=active_version,
         )
         await asyncio.to_thread(self._save_document_record, record)
 
@@ -247,10 +288,11 @@ class RagService:
             # message instead of retrying it to the DLQ.
             raise DocumentDeletedError(job.document_id)
         if record.version != job.version:
-            raise ValueError(
-                f"Document version mismatch for {job.document_id}: "
-                f"record={record.version}, job={job.version}"
-            )
+            # The stored record has moved on to a different version (a newer
+            # upload replaced this one). This job is stale: it can never produce
+            # the current version, so signal StaleIngestionError — the worker
+            # drops it as a no-op instead of retrying it to the DLQ.
+            raise StaleIngestionError(job.document_id, job.version, record.version)
 
         try:
             content = self._store.get_raw(job.document_id, job.version, job.filename)
@@ -366,9 +408,21 @@ class RagService:
                 },
             )
 
-            final = record.model_copy(update={"status": DocumentStatus.indexed, "error": None})
+            final = record.model_copy(
+                update={
+                    "status": DocumentStatus.indexed,
+                    "active_version": version,
+                    "error": None,
+                }
+            )
+            # This record write is the atomic publication switch: until it lands,
+            # active_version still points at the previous version (or None), so
+            # the vectors upserted above are not yet searchable (see
+            # _active_version_for). After it lands, garbage-collect the previous
+            # version's vectors and any partials from earlier attempts.
             await asyncio.to_thread(self._save_document_record, final)
             logger.info("Ingestion complete for %s", filename, extra=log_extra)
+            self._cleanup_superseded_vectors(document_id, version, log_extra)
             return final
         except DocumentDeletedError:
             # The document was deleted (DELETE /documents/{id}) while this job
@@ -376,6 +430,14 @@ class RagService:
             # it; roll back any vectors we may have already upserted so the
             # deleted state is consistent, then stop without marking failed.
             return self._abort_ingestion_for_deleted(document_id, log_extra)
+        except StaleIngestionError:
+            # A newer upload replaced this document while the job was mid-flight.
+            # The record write was refused to avoid clobbering the newer version;
+            # stop without marking failed and without deleting vectors (the newer
+            # version owns the document now — a document_id-wide delete here would
+            # also remove its vectors; publication-level cleanup is handled by the
+            # version-scoped index work).
+            return self._abort_ingestion_for_superseded(document_id, log_extra)
         except Exception as exc:
             # R12.6: The record_span context manager automatically sets the
             # failing stage span status to "error" and records the exception.
@@ -397,6 +459,15 @@ class RagService:
                 # Deletion also won the race against the failure write — the
                 # document is intentionally gone, so don't record a failure.
                 return self._abort_ingestion_for_deleted(document_id, log_extra)
+            except StaleIngestionError:
+                # A newer upload won the race against the failure write — the
+                # newer version owns the record, so don't overwrite it with this
+                # stale failure.
+                return self._abort_ingestion_for_superseded(document_id, log_extra)
+            # Remove this failed version's partial vectors so they can never be
+            # published; the previously published version (a different version)
+            # is untouched and stays searchable.
+            self._cleanup_failed_version_vectors(document_id, version, log_extra)
             raise
 
     def _abort_ingestion_for_deleted(
@@ -426,6 +497,84 @@ class RagService:
             s3_uri="",
             status=DocumentStatus.deleted,
         )
+
+    def _abort_ingestion_for_superseded(
+        self, document_id: str, log_extra: dict[str, Any]
+    ) -> DocumentRecord:
+        """Stop a stale ingestion whose version was replaced by a newer upload.
+
+        Unlike the deleted-abort, this does NOT delete vectors: the newer
+        version now owns the document and a ``document_id``-wide delete would
+        remove its vectors too. We simply return the current (newer) record so
+        the worker completes the stale job as a no-op.
+        """
+        logger.info(
+            "Ingestion superseded by a newer document version; stopping without "
+            "overwriting the current record",
+            extra=log_extra,
+        )
+        metrics.increment("rag_documents_ingestion_superseded_total")
+        current = self.get_document(document_id)
+        if current is not None:
+            return current
+        # No canonical record to return (should not happen: the newer upload
+        # wrote one). Synthesise a neutral non-terminal view.
+        return DocumentRecord(
+            id=document_id,
+            title="",
+            version="",
+            s3_uri="",
+            status=DocumentStatus.queued,
+        )
+
+    def _cleanup_superseded_vectors(
+        self, document_id: str, keep_version: str, log_extra: dict[str, Any]
+    ) -> None:
+        """Best-effort GC of non-published vectors after a publication switch.
+
+        Runs after the active version is switched, so a failure here is not
+        correctness-critical: the search gate already hides any non-active
+        vectors that remain. Swallow errors so a cleanup hiccup never fails an
+        ingestion that already published successfully.
+        """
+        try:
+            self.index.delete_document_except_version(document_id, keep_version)
+        except Exception:
+            logger.warning(
+                "Post-publish vector cleanup failed; superseded vectors remain "
+                "(hidden by the active-version gate until a later cleanup)",
+                extra=log_extra,
+                exc_info=True,
+            )
+
+    def _cleanup_failed_version_vectors(
+        self, document_id: str, version: str, log_extra: dict[str, Any]
+    ) -> None:
+        """Best-effort removal of a failed ingestion's partial vectors."""
+        try:
+            self.index.delete_document_version(document_id, version)
+        except Exception:
+            logger.warning(
+                "Failed-ingestion vector cleanup failed; partial vectors remain "
+                "(hidden by the active-version gate)",
+                extra=log_extra,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _published_version_of(record: DocumentRecord | None) -> str | None:
+        """Return the searchable (published) version for a record, or ``None``.
+
+        Falls back to ``version`` for legacy ``indexed`` records written before
+        the ``active_version`` pointer existed, so they keep serving results.
+        """
+        if record is None or record.status == DocumentStatus.deleted:
+            return None
+        if record.active_version:
+            return record.active_version
+        if record.status == DocumentStatus.indexed:
+            return record.version
+        return None
 
     def get_document(self, document_id: str) -> DocumentRecord | None:
         # Only trust the in-memory cache for records in a TERMINAL state. While a
@@ -528,16 +677,22 @@ class RagService:
         )
 
     def _persist_record(self, record: DocumentRecord, key: str) -> None:
-        """Persist a document record, refusing to resurrect a deleted one.
+        """Persist a document record, refusing writes that would corrupt it.
 
-        ``deleted`` is a terminal state: a write that carries any other status
-        is rejected with :class:`DocumentDeletedError` when the canonical stored
-        record is already deleted. This closes the last-writer-wins race where a
-        ``DELETE`` and an in-flight ingestion both wrote ``record.json`` and the
-        worker's ``indexed`` write could overwrite the delete.
+        Two invariants are enforced against the canonical stored record:
+
+        * ``deleted`` is terminal — a live status is rejected with
+          :class:`DocumentDeletedError` when the stored record is already
+          deleted, closing the last-writer-wins race where a ``DELETE`` and an
+          in-flight ingestion both wrote ``record.json``.
+        * the version must still match — a progress/terminal write for a version
+          other than the currently stored one is rejected with
+          :class:`StaleIngestionError` (a newer upload replaced it). A ``queued``
+          write is exempt because that is how a fresh upload introduces the new
+          version.
 
         When the store supports compare-and-set (real S3 via ETags) the check
-        and write are atomic: we read the current ETag, verify the invariant,
+        and write are atomic: we read the current ETag, verify the invariants,
         then write conditionally, retrying on conflict. Stores without CAS (the
         in-memory test doubles, which are single-threaded and never actually
         race) fall back to a read-then-write guard.
@@ -552,13 +707,13 @@ class RagService:
             # doubles) simply writes as before. Real S3 always takes the CAS
             # branch below, so production never relies on this fallback.
             if hasattr(self._store, "get_json"):
-                self._reject_resurrection(record, self._store.get_json(key))
+                self._reject_illegal_write(record, self._store.get_json(key))
             self._store.put_json(key, payload)
             return
 
         for _ in range(_MAX_RECORD_CAS_ATTEMPTS):
             current, etag = self._store.get_json_with_etag(key)
-            self._reject_resurrection(record, current)
+            self._reject_illegal_write(record, current)
             try:
                 if current is None:
                     self._store.put_json_conditional(key, payload, if_none_match=True)
@@ -567,19 +722,36 @@ class RagService:
                 return
             except PreconditionFailed:
                 # Another writer changed the record between our read and write.
-                # Reload and re-check the deleted invariant before retrying.
+                # Reload and re-check the invariants before retrying.
                 continue
         raise PreconditionFailed(key)
 
     @staticmethod
-    def _reject_resurrection(record: DocumentRecord, current: object | None) -> None:
-        if record.status == DocumentStatus.deleted:
+    def _reject_illegal_write(record: DocumentRecord, current: object | None) -> None:
+        """Reject deleted-resurrection and stale-version writes.
+
+        See :meth:`_persist_record` for the invariants. ``queued`` and
+        ``deleted`` writes are exempt from the version check: the former is how a
+        fresh upload introduces a new version, the latter always carries the
+        current version (delete copies the stored record).
+        """
+        if not isinstance(current, dict):
+            # No prior record (creation) — nothing to protect.
             return
+
         if (
-            isinstance(current, dict)
+            record.status != DocumentStatus.deleted
             and current.get("status") == DocumentStatus.deleted.value
         ):
             raise DocumentDeletedError(record.id)
+
+        current_version = current.get("version")
+        if (
+            current_version is not None
+            and record.version != current_version
+            and record.status not in (DocumentStatus.queued, DocumentStatus.deleted)
+        ):
+            raise StaleIngestionError(record.id, record.version, current_version)
 
     def get_query_trace(self, trace_id: str) -> QueryTraceRecord | None:
         payload = self._store.get_json(query_trace_key(trace_id))
@@ -613,6 +785,50 @@ class RagService:
             extra={"trace_id": trace_id, "feedback_id": record.feedback_id},
         )
         return record
+
+    def _active_version_for(self, document_id: str) -> str | None:
+        """Look up a document's published version for the search gate.
+
+        Fail-closed: if the record is missing, deleted, or cannot be read, the
+        document's vectors are treated as not-searchable (returns ``None``). In
+        production every document with vectors has a record (created at queue
+        time), so this only excludes genuinely orphaned/deleted vectors.
+        """
+        try:
+            record = self.get_document(document_id)
+        except Exception:
+            logger.warning(
+                "Active-version lookup failed; excluding document from results",
+                extra={"document_id": document_id},
+                exc_info=True,
+            )
+            return None
+        return self._published_version_of(record)
+
+    def _filter_to_active_versions(
+        self, hits: list[RetrievalHit], log_extra: dict[str, Any]
+    ) -> list[RetrievalHit]:
+        """Keep only hits whose version matches their document's active version."""
+        if not hits:
+            return hits
+        active_by_doc: dict[str, str | None] = {}
+        kept: list[RetrievalHit] = []
+        for hit in hits:
+            document_id = hit.chunk.document_id
+            if document_id not in active_by_doc:
+                active_by_doc[document_id] = self._active_version_for(document_id)
+            active_version = active_by_doc[document_id]
+            if active_version is not None and hit.chunk.version == active_version:
+                kept.append(hit)
+        dropped = len(hits) - len(kept)
+        if dropped:
+            metrics.observe("rag_retrieval_non_active_hits_filtered", dropped)
+            logger.info(
+                "Filtered %d non-active-version hit(s) from retrieval",
+                dropped,
+                extra={**log_extra, "filtered_hits": dropped},
+            )
+        return kept
 
     def _retrieve(
         self,
@@ -656,12 +872,18 @@ class RagService:
             else "dense retrieval"
         )
         with recorder.record_span(retrieval_operation) as retrieval_span:
-            hits = self.index.search(
+            raw_hits = self.index.search(
                 query_vector=query_vector,
                 sparse_vector=sparse_query,
                 top_k=self._settings.retrieval_dense_top_k,
                 document_ids=request.document_ids,
             )
+            # Drop any hit whose version is not the document's published version.
+            # This is what makes publication atomic from the reader's side:
+            # in-flight/partial vectors (a not-yet-published version) and the
+            # previous version's leftover vectors (awaiting cleanup) are never
+            # returned, even though they physically coexist in the index.
+            hits = self._filter_to_active_versions(raw_hits, log_extra)
             recorder.set_retrieval_attributes(
                 retrieval_span,
                 retrieval_mode=retrieval_mode,

@@ -25,7 +25,8 @@ from rag_system.models import (
     EmbeddedChunk,
     ParsedDocument,
 )
-from rag_system.service import DocumentDeletedError, RagService
+from rag_system.service import DocumentDeletedError, RagService, StaleIngestionError
+from rag_system.queue import IngestionJob
 from rag_system.storage import PreconditionFailed, document_record_key
 
 
@@ -265,3 +266,95 @@ def test_concurrent_delete_during_ingestion_rolls_back_and_does_not_index() -> N
     # Vectors upserted mid-flight were rolled back.
     assert index.deleted_document_ids == ["doc-123"]
     assert index.upserted == []
+
+
+# ---------------------------------------------------------------------------
+# _persist_record invariant: version must match (stale-write protection).
+# ---------------------------------------------------------------------------
+
+
+def test_stale_progress_write_over_newer_version_is_rejected() -> None:
+    # A newer upload (version "v2") already replaced the record. A stale
+    # ingestion for the old version must not clobber it with its progress write.
+    store = CasStore()
+    key = document_record_key("doc-123")
+    newer = _record(DocumentStatus.queued).model_copy(update={"version": "v2"})
+    store.put_json(key, newer.model_dump(mode="json"))
+    service = _service(store)
+
+    with pytest.raises(StaleIngestionError):
+        service._save_document_record(_record(DocumentStatus.indexed))  # version "abc"
+
+    # The newer queued record is preserved; the cache is not poisoned.
+    assert store.get_json(key)["version"] == "v2"
+    assert store.get_json(key)["status"] == DocumentStatus.queued
+    assert "doc-123" not in service._documents
+
+
+def test_new_upload_queued_write_replaces_in_flight_version() -> None:
+    # A fresh upload legitimately introduces a new version, so a ``queued`` write
+    # is exempt from the version guard and replaces the in-flight record.
+    store = CasStore()
+    key = document_record_key("doc-123")
+    store.put_json(key, _record(DocumentStatus.parsing).model_dump(mode="json"))
+    service = _service(store)
+
+    replacement = _record(DocumentStatus.queued).model_copy(update={"version": "v2"})
+    service._save_document_record(replacement)
+
+    assert store.get_json(key)["version"] == "v2"
+    assert store.get_json(key)["status"] == DocumentStatus.queued
+
+
+def test_process_document_job_drops_stale_version_as_no_op() -> None:
+    # When the stored record has moved on to a newer version, the old job is
+    # stale: it raises StaleIngestionError (which the worker drops as a no-op)
+    # instead of a bare ValueError that would retry to the DLQ.
+    store = CasStore()
+    key = document_record_key("doc-123")
+    current = _record(DocumentStatus.queued).model_copy(update={"version": "v2"})
+    store.put_json(key, current.model_dump(mode="json"))
+    service = _service(store)
+
+    job = IngestionJob(
+        document_id="doc-123",
+        version="abc",  # superseded by "v2"
+        filename="source.pdf",
+        s3_uri="s3://bucket/raw/doc-123/abc/source.pdf",
+    )
+
+    with pytest.raises(StaleIngestionError):
+        asyncio.run(service.process_document_job(job))
+
+
+def test_ingestion_superseded_midflight_stops_without_overwrite_or_rollback() -> None:
+    # A newer upload lands exactly as the worker writes the terminal ``indexed``
+    # status. The stale write must be refused, the newer record preserved, and
+    # vectors must NOT be deleted (the newer version owns the document).
+    store = CasStore()
+    key = document_record_key("doc-123")
+    store.put_json(key, _record(DocumentStatus.queued).model_dump(mode="json"))
+    index = FakeIndex()
+    service = _service(store, index)
+
+    def newer_upload_lands_at_indexed_write(s: CasStore, k: str, payload) -> None:
+        if isinstance(payload, dict) and payload.get("status") == DocumentStatus.indexed:
+            newer = {
+                **payload,
+                "version": "newer-version",
+                "status": DocumentStatus.queued.value,
+                "error": None,
+            }
+            s.objects[k] = (newer, s._next_etag())
+
+    store.before_conditional_write = newer_upload_lands_at_indexed_write
+
+    result = asyncio.run(service._run_ingestion(_record(), b"%PDF-1.4"))
+
+    # The newer version's queued record survives; the stale "indexed" write lost.
+    assert store.get_json(key)["version"] == "newer-version"
+    assert store.get_json(key)["status"] == DocumentStatus.queued
+    assert result.version == "newer-version"
+    # Vectors upserted mid-flight are left in place, not rolled back.
+    assert index.deleted_document_ids == []
+    assert index.upserted != []

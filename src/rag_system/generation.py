@@ -89,10 +89,28 @@ class GroundedAnswerGenerator:
 
         parsed = _parse_structured_answer(raw_answer)
         if parsed is None:
-            answer_text = raw_answer.strip()
-            used_chunk_ids = [citation.chunk_id for citation in candidate_citations]
-            confidence = "medium" if hits else "low"
-            insufficient_reason = None if hits else "No retrieved evidence."
+            # Fail closed. The model did not return the required JSON, so we
+            # cannot verify which chunks (if any) actually support the prose.
+            # Crediting every retrieved chunk here (the previous behaviour) let
+            # unverifiable prose be labelled "grounded". Keep the prose but
+            # attach no citations and mark the evidence insufficient.
+            metrics.increment(
+                "rag_generation_unparseable_output_total", {"model_id": self._model_id}
+            )
+            logger.warning(
+                "LLM answer was not valid structured output; failing closed with no citations",
+                extra=log_extra,
+            )
+            answer_text = (
+                raw_answer.strip()
+                or "The available documents do not contain enough evidence."
+            )
+            used_chunk_ids = []
+            confidence = "low"
+            insufficient_reason = (
+                "Model response could not be validated against the required schema, "
+                "so no citations were verified."
+            )
         else:
             answer_text = str(parsed.get("answer") or "").strip()
             if not answer_text:
@@ -214,9 +232,23 @@ class GroundedAnswerGenerator:
 
         parsed = _parse_structured_answer(meta_raw) if meta_raw else None
         if parsed is None:
-            used_chunk_ids = [citation.chunk_id for citation in candidate_citations]
-            confidence = "medium" if hits else "low"
-            insufficient_reason = None if hits else "No retrieved evidence."
+            # Fail closed: the trailing metadata block was missing or malformed,
+            # so no citations can be verified. Attach none and mark evidence
+            # insufficient rather than crediting every retrieved chunk. (The
+            # prose was already streamed to the user as deltas above.)
+            metrics.increment(
+                "rag_generation_unparseable_output_total", {"model_id": self._model_id}
+            )
+            logger.warning(
+                "Streamed answer had no valid metadata block; failing closed with no citations",
+                extra=log_extra,
+            )
+            used_chunk_ids = []
+            confidence = "low"
+            insufficient_reason = (
+                "Model response could not be validated against the required schema, "
+                "so no citations were verified."
+            )
         else:
             used_chunk_ids = _extract_used_citation_ids(parsed)
             confidence = _normalise_confidence(parsed.get("confidence"))

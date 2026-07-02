@@ -113,6 +113,13 @@ class InMemoryUserStore:
         self._by_email[key] = record
         return record
 
+    def create_bootstrap_user(self, email: str, password_hash: str) -> UserRecord | None:
+        # Models the atomic "insert only if the table is empty" guard: once any
+        # user exists, the bootstrap insert affects no rows and returns None.
+        if self._by_id:
+            return None
+        return self.create_user(email, password_hash)
+
     # -- test helpers --------------------------------------------------------
 
     def add(self, record: UserRecord) -> UserRecord:
@@ -157,10 +164,12 @@ class InMemoryRefreshStore:
                 return record
         return None
 
-    def revoke(self, token_id: str) -> None:
+    def revoke(self, token_id: str) -> bool:
         record = self._by_id.get(token_id)
         if record is not None and record.revoked_at is None:
             self._by_id[token_id] = dataclasses.replace(record, revoked_at=_now())
+            return True
+        return False
 
     def revoke_all_for_user(self, user_id: str) -> int:
         count = 0
@@ -205,7 +214,13 @@ class _FakeCursor:
 
     def execute(self, sql: str, params: tuple = ()) -> None:
         s = " ".join(sql.split())
-        if "INSERT INTO users" in s:
+        if "pg_advisory_xact_lock" in s:
+            # Serialisation primitive; the single-threaded double is already
+            # serial, so the lock is a no-op here.
+            self._result = (1,)
+        elif "INSERT INTO users" in s and "WHERE NOT EXISTS" in s:
+            self._insert_bootstrap_user(params)
+        elif "INSERT INTO users" in s:
             self._insert_user(params)
         elif "FROM users WHERE lower(email)" in s:
             self._result = self._db.find_user_by_email(params[0])
@@ -230,6 +245,17 @@ class _FakeCursor:
     def _insert_user(self, params: tuple) -> None:
         if self._db.force_unique_violation:
             raise FakeUniqueViolation("duplicate key value violates users_email_lower_key")
+        user_id, email, password_hash, is_active, created_at = params
+        row = (user_id, email, password_hash, is_active, created_at)
+        self._db.users[user_id] = row
+        self._result = row
+
+    def _insert_bootstrap_user(self, params: tuple) -> None:
+        # Conditional insert: only succeeds while the users table is empty
+        # (WHERE NOT EXISTS). Otherwise RETURNING yields no row.
+        if self._db.users:
+            self._result = None
+            return
         user_id, email, password_hash, is_active, created_at = params
         row = (user_id, email, password_hash, is_active, created_at)
         self._db.users[user_id] = row

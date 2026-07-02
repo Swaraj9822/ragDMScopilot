@@ -119,6 +119,42 @@ class PineconeHybridIndex:
         )
 
     @retry_on_transient()
+    def delete_document_version(self, document_id: str, version: str) -> None:
+        """Delete only the vectors of one document *version*.
+
+        Used to clean up the partial vectors left by a failed or superseded
+        ingestion without touching the currently published version (whose
+        vectors carry a different ``version`` in their metadata).
+        """
+        logger.info(
+            "Deleting Pinecone vectors for document version",
+            extra={"document_id": document_id, "version": version},
+        )
+        self._index.delete(
+            filter={"document_id": {"$eq": document_id}, "version": {"$eq": version}}
+        )
+        metrics.increment("rag_pinecone_delete_document_version_total")
+
+    @retry_on_transient()
+    def delete_document_except_version(self, document_id: str, keep_version: str) -> None:
+        """Delete every vector of a document except the published version.
+
+        Called after an ingestion atomically switches the active version, to
+        garbage-collect the previous version's vectors and any lingering partials
+        from earlier failed/superseded attempts. Best-effort: the active-version
+        search gate already hides non-published vectors, so a cleanup failure is
+        not correctness-critical.
+        """
+        logger.info(
+            "Deleting superseded Pinecone vectors for document",
+            extra={"document_id": document_id, "keep_version": keep_version},
+        )
+        self._index.delete(
+            filter={"document_id": {"$eq": document_id}, "version": {"$ne": keep_version}}
+        )
+        metrics.increment("rag_pinecone_delete_superseded_total")
+
+    @retry_on_transient()
     def search(
         self,
         query_vector: list[float],

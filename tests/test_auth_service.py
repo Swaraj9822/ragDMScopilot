@@ -57,6 +57,19 @@ def test_registration_closes_after_first_user_when_disabled():
         service.register("second@example.com", "password123")
 
 
+def test_bootstrap_registration_refuses_second_account_atomically():
+    """With registration closed, a second bootstrap attempt — even with a
+    different email — is refused. The old has_users()-then-create gate let two
+    concurrent first-registrations through; the atomic bootstrap insert does not."""
+    service, users, _, _ = _service(RAG_AUTH_ALLOW_REGISTRATION=False)
+    first = service.register("first@example.com", "password123")
+    assert users.get_by_id(first.id) is not None
+
+    with pytest.raises(RegistrationClosedError):
+        service.register("second@example.com", "password123")
+    assert users.get_by_email("second@example.com") is None
+
+
 def test_registration_stays_open_when_enabled():
     service, _, _, _ = _service(RAG_AUTH_ALLOW_REGISTRATION=True)
     service.register("first@example.com", "password123")
@@ -151,6 +164,45 @@ def test_refresh_unknown_token_raises():
     service, _, _, _ = _service()
     with pytest.raises(InvalidRefreshTokenError):
         service.refresh("totally-unknown-token")
+
+
+def test_refresh_losing_the_revoke_race_issues_no_successor():
+    """Two concurrent refreshes of the same token: only the winner (the caller
+    whose atomic revoke succeeds) may mint a successor. The loser must fail and
+    issue nothing, so one refresh token never yields two valid families."""
+    settings = make_settings(RAG_AUTH_ALLOW_REGISTRATION=True)
+    users = InMemoryUserStore()
+
+    class LosingRaceRefreshStore(InMemoryRefreshStore):
+        # The token still looks unrevoked at read time (we lost the race after
+        # our own read), but the conditional revoke reports 0 rows updated.
+        def revoke(self, token_id: str) -> bool:
+            return False
+
+    refresh = LosingRaceRefreshStore()
+    service = AuthService(settings, store=users, refresh_store=refresh)
+    service.register("user@example.com", "password123")
+    first = service.login("user@example.com", "password123")
+
+    before = refresh.active_count(users.get_by_email("user@example.com").id)
+    with pytest.raises(InvalidRefreshTokenError):
+        service.refresh(first.refresh_token)
+
+    # No new refresh token was persisted for the loser.
+    after = refresh.active_count(users.get_by_email("user@example.com").id)
+    assert after == before
+
+
+def test_refresh_winner_revokes_exactly_once():
+    """The atomic revoke returns True for the first caller and False afterwards,
+    so a replayed rotation cannot issue a second successor."""
+    _service_obj, _users, refresh, _settings = _service(RAG_AUTH_ALLOW_REGISTRATION=True)
+    _service_obj.register("user@example.com", "password123")
+    pair = _service_obj.login("user@example.com", "password123")
+    token_id = refresh.get_by_hash(hash_refresh_token(pair.refresh_token)).id
+
+    assert refresh.revoke(token_id) is True
+    assert refresh.revoke(token_id) is False
 
 
 def test_refresh_reuse_of_revoked_token_revokes_entire_family():
