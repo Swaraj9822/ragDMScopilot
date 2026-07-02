@@ -1,5 +1,5 @@
-import { Suspense, lazy } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Suspense, lazy, useEffect, useRef } from "react";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { AppShell } from "../components/common/AppShell";
 import { PageLoading } from "../components/common/PageLoading";
 import { useAuth } from "../hooks/useAuth";
@@ -21,6 +21,22 @@ const DocumentsPage = isTest
 
 export function App() {
   const { status } = useAuth();
+  const navigate = useNavigate();
+  const wasAuthenticated = useRef(false);
+
+  // Whenever the user becomes authenticated — a fresh sign-in or a resumed
+  // session when the app is (re)opened — start on a clean Copilot tab instead
+  // of restoring whatever URL happened to be in the address bar. The ref guard
+  // means this only fires on the unauthenticated→authenticated transition, so
+  // in-app navigation between tabs is left untouched.
+  useEffect(() => {
+    if (status === "authenticated" && !wasAuthenticated.current) {
+      wasAuthenticated.current = true;
+      navigate("/copilot", { replace: true });
+    } else if (status === "unauthenticated") {
+      wasAuthenticated.current = false;
+    }
+  }, [status, navigate]);
 
   // Resolving a stored session — hold the chrome back until we know.
   if (status === "loading") {

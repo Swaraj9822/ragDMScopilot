@@ -1,7 +1,6 @@
 import { useCallback, useState } from "react";
 import { LOCALSTORAGE_KEYS } from "../lib/constants";
 import { readJson, writeJson } from "../lib/persistence";
-import type { ObsView } from "../components/observability/ViewSwitch";
 
 export type RefreshInterval = 5 | 10 | 30;
 
@@ -10,8 +9,6 @@ export interface ObservabilityPrefs {
   autoRefresh: boolean;
   intervalSeconds: RefreshInterval;
   hideConsoleTraffic: boolean;
-  /** Last selected view tab (Traces / Individual Query / Logs), restored across visits. */
-  lastView: ObsView;
 }
 
 const DEFAULTS: ObservabilityPrefs = {
@@ -19,7 +16,6 @@ const DEFAULTS: ObservabilityPrefs = {
   autoRefresh: true,
   intervalSeconds: 10,
   hideConsoleTraffic: true,
-  lastView: "traces",
 };
 
 function load(): ObservabilityPrefs {

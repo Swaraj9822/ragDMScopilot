@@ -14,6 +14,20 @@ describe("App navigation", () => {
     ).toBeInTheDocument();
   });
 
+  it("starts on a clean Copilot tab after authenticating, ignoring the entry URL", async () => {
+    // Simulates opening the app (resumed session) while the address bar still
+    // points at a previously-visited Observability view.
+    renderWithProviders(<App />, { route: "/observability?view=queries" });
+    expect(
+      await screen.findByRole("heading", {
+        name: /ask across documents and business data/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /ai observability/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("exposes three top-level tabs and marks the active one", async () => {
     renderWithProviders(<App />, { route: "/copilot" });
     await screen.findByRole("heading", {

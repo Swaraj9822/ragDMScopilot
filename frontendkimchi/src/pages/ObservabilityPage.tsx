@@ -46,14 +46,16 @@ export default function ObservabilityPage() {
   const { prefs, update } = useObservabilityPrefs();
 
   const viewParam = searchParams.get("view");
+  // Landing on Observability without an explicit ?view always opens on Traces.
+  // The active tab is tracked in the URL while on the page, but it is never
+  // restored across navigations — arriving fresh should never drop you onto the
+  // Individual Query or Logs tab.
   const view: ObsView =
     viewParam === "logs"
       ? "logs"
       : viewParam === "queries"
         ? "queries"
-        : viewParam === "traces"
-          ? "traces"
-          : prefs.lastView;
+        : "traces";
   const selectedTraceId = searchParams.get("trace");
   const [filters, setFilters] = useState<TraceFilterState>(() =>
     filtersFromParams(searchParams),
@@ -172,7 +174,6 @@ export default function ObservabilityPage() {
   }
 
   function setView(next: ObsView) {
-    update({ lastView: next });
     updateParam((p) => p.set("view", next));
   }
 

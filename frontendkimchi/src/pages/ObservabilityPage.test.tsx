@@ -29,6 +29,29 @@ function sampleTrace(): Trace {
 }
 
 describe("ObservabilityPage", () => {
+  it("opens on the Traces tab when no view is specified", async () => {
+    server.use(http.get(`${API}/traces`, () => HttpResponse.json([])));
+    renderWithProviders(<ObservabilityPage />, { route: "/observability" });
+
+    const tracesTab = await screen.findByRole("tab", { name: /^traces$/i });
+    expect(tracesTab).toHaveAttribute("aria-selected", "true");
+    // The middle "Individual Query" tab must not be the landing view.
+    expect(
+      screen.getByRole("tab", { name: /individual query/i }),
+    ).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("honors an explicit ?view=queries in the URL", async () => {
+    server.use(http.get(`${API}/traces`, () => HttpResponse.json([])));
+    renderWithProviders(<ObservabilityPage />, {
+      route: "/observability?view=queries",
+    });
+
+    expect(
+      await screen.findByRole("tab", { name: /individual query/i }),
+    ).toHaveAttribute("aria-selected", "true");
+  });
+
   it("shows the empty-window state when no traces match", async () => {
     server.use(http.get(`${API}/traces`, () => HttpResponse.json([])));
     renderWithProviders(<ObservabilityPage />, { route: "/observability" });
