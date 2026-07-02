@@ -80,3 +80,17 @@
   white-space: pre-wrap;
   overflow-x: auto;
 }
+
+/* On narrow screens the fixed-width meta columns (time, level, logger) consume
+   the whole row, squeezing the flexible message to ~1 character wide where
+   `overflow-wrap: anywhere` then breaks it one letter per line. Let the row
+   wrap and drop the message onto its own full-width line so it reads normally. */
+@media (max-width: 640px) {
+  .head {
+    flex-wrap: wrap;
+  }
+  .message {
+    order: 1;
+    flex-basis: 100%;
+  }
+}

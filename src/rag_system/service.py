@@ -451,11 +451,15 @@ class RagService:
         metrics.increment("rag_queries_total", {"mode": retrieval_mode})
         metrics.observe("rag_query_length_chars", len(request.question), {"mode": retrieval_mode})
 
-        with timed(logger, "query embedding (dense)", **log_extra):
+        from rag_system.observability_tracing import get_span_recorder
+
+        recorder = get_span_recorder()
+
+        with recorder.record_span("query embedding (dense)"):
             query_vector = self.embedder.embed_query(request.question)
 
         if self._settings.sparse_enabled:
-            with timed(logger, "query encoding (sparse/BM25)", **log_extra):
+            with recorder.record_span("query encoding (sparse/BM25)"):
                 sparse_query = self.sparse_encoder.encode_query(request.question)
         else:
             sparse_query = None
@@ -477,12 +481,18 @@ class RagService:
             if self._settings.sparse_enabled
             else "dense retrieval"
         )
-        with timed(logger, retrieval_operation, **log_extra):
+        with recorder.record_span(retrieval_operation) as retrieval_span:
             hits = self.index.search(
                 query_vector=query_vector,
                 sparse_vector=sparse_query,
                 top_k=self._settings.retrieval_dense_top_k,
                 document_ids=request.document_ids,
+            )
+            recorder.set_retrieval_attributes(
+                retrieval_span,
+                retrieval_mode=retrieval_mode,
+                hit_count=len(hits),
+                top_score=hits[0].score if hits else None,
             )
         logger.info(
             "Retrieved %d hits", len(hits), extra={**log_extra, "hit_count": len(hits)}
@@ -492,14 +502,19 @@ class RagService:
         # Reranking is optional — controlled by RAG_RERANK_ENABLED
         reranker = self.reranker
         if reranker:
-            with timed(logger, "reranking", **log_extra):
+            with recorder.record_span("reranking"):
                 top_hits = reranker.rerank(request.question, hits)
             logger.info("Reranked to %d hits", len(top_hits), extra=log_extra)
         else:
             top_hits = hits[: self._settings.rerank_top_k]
 
-        with timed(logger, "answer generation", **log_extra):
+        with recorder.record_span("answer generation") as answer_span:
             response = self.generator.answer(request.question, top_hits, trace_id)
+            recorder.set_answer_generation_attributes(
+                answer_span,
+                evidence_status=response.evidence_status,
+                citation_count=len(response.citations),
+            )
 
         latency_ms = (time.perf_counter() - query_start) * 1000
         # Persist the trace off the response path — it's observability only and
@@ -537,11 +552,15 @@ class RagService:
         logger.info("Processing query (streaming, trace=%s)", trace_id, extra=log_extra)
         metrics.increment("rag_queries_total", {"mode": retrieval_mode})
 
+        from rag_system.observability_tracing import get_span_recorder
+
+        recorder = get_span_recorder()
+
         yield {"type": "status", "stage": "retrieving"}
-        with timed(logger, "query embedding (dense)", **log_extra):
+        with recorder.record_span("query embedding (dense)"):
             query_vector = self.embedder.embed_query(request.question)
         if self._settings.sparse_enabled:
-            with timed(logger, "query encoding (sparse/BM25)", **log_extra):
+            with recorder.record_span("query encoding (sparse/BM25)"):
                 sparse_query = self.sparse_encoder.encode_query(request.question)
         else:
             sparse_query = None
@@ -551,18 +570,24 @@ class RagService:
             if self._settings.sparse_enabled
             else "dense retrieval"
         )
-        with timed(logger, retrieval_operation, **log_extra):
+        with recorder.record_span(retrieval_operation) as retrieval_span:
             hits = self.index.search(
                 query_vector=query_vector,
                 sparse_vector=sparse_query,
                 top_k=self._settings.retrieval_dense_top_k,
                 document_ids=request.document_ids,
             )
+            recorder.set_retrieval_attributes(
+                retrieval_span,
+                retrieval_mode=retrieval_mode,
+                hit_count=len(hits),
+                top_score=hits[0].score if hits else None,
+            )
         self._observe_retrieval_quality(hits, retrieval_mode, log_extra)
 
         reranker = self.reranker
         if reranker:
-            with timed(logger, "reranking", **log_extra):
+            with recorder.record_span("reranking"):
                 top_hits = reranker.rerank(request.question, hits)
         else:
             top_hits = hits[: self._settings.rerank_top_k]

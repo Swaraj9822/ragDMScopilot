@@ -266,7 +266,7 @@ changing their observable behaviour.
       (400 on inverted range or out-of-range limit)
     - _Requirements: 15.3, 15.4, 16.7, 16.8, 16.9_
 
-  - [-] 14.3 Write property test for trace_id path validation
+  - [x] 14.3 Write property test for trace_id path validation
     - **Property 10: trace_id path validation rejects non-conforming identifiers**
     - **Validates: Requirements 7.3, 15.3**
 
@@ -283,7 +283,7 @@ changing their observable behaviour.
     - _Requirements: 7.4, 8.10, 15.4, 16.9_
 
 - [x] 15. HTTP middleware integration (Root_Span)
-  - [-] 15.1 Extend `log_requests` middleware to open/close the Root_Span
+  - [x] 15.1 Extend `log_requests` middleware to open/close the Root_Span
     - Call the sampler, open `start_trace(route=...)`, record `http.status_code`, set status
       success/error (500 when undetermined), re-raise; preserve `X-Trace-Id` response header behaviour
     - _Requirements: 4.5, 4.6, 11.3, 11.4_
@@ -297,7 +297,7 @@ changing their observable behaviour.
     - _Requirements: 11.4_
 
 - [x] 16. Pipeline stage instrumentation
-  - [-] 16.1 Replace `timed()` call sites in `service.py` with `record_span`
+  - [x] 16.1 Replace `timed()` call sites in `service.py` with `record_span`
     - Wrap each pipeline stage in `record_span` using the same operation labels and attach stage
       attributes (model/tokens, retrieval mode/hit count/top score, evidence status/citation count,
       document id); continue emitting `rag_operation_total` / `rag_operation_duration_ms`
@@ -321,7 +321,7 @@ changing their observable behaviour.
     - _Requirements: 11.2_
 
 - [x] 17. Ingestion pipeline tracing
-  - [-] 17.1 Include the active trace_id in enqueued ingestion job payloads
+  - [x] 17.1 Include the active trace_id in enqueued ingestion job payloads
     - Set the job payload `trace_id` to the active trace_id, or null when no trace is active
     - _Requirements: 2.7, 2.8_
 
