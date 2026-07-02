@@ -15,10 +15,10 @@ class PineconeHybridIndex:
         self._index = Pinecone(api_key=settings.pinecone_api_key).Index(
             settings.pinecone_index_name
         )
-        self._upsert_batch_size = max(1, getattr(settings, "pinecone_upsert_batch_size", 100))
+        # Config validator enforces a sane [1, 1000] range for this setting.
+        self._upsert_batch_size = settings.pinecone_upsert_batch_size
         logger.info("Connected to Pinecone index '%s'", settings.pinecone_index_name)
 
-    @retry_on_transient()
     def upsert(self, embedded_chunks: list[EmbeddedChunk]) -> None:
         vectors = []
         for item in embedded_chunks:
@@ -76,12 +76,16 @@ class PineconeHybridIndex:
             metrics.observe("rag_pinecone_upsert_avg_sparse_terms", avg_sparse_terms)
             # Pinecone caps request size (~2MB); a large document can exceed it
             # in a single call and fail the whole ingestion. Upsert in bounded
-            # batches so each request stays within limits.
+            # batches so each request stays within limits. The retry lives on
+            # _upsert_batch (not on this method) so a transient failure re-sends
+            # only the offending batch instead of re-running every batch —
+            # upserts are idempotent, so a whole-method retry was correctness-safe
+            # but doubled work and Pinecone load under throttling.
             batch_size = self._upsert_batch_size
             batch_count = (len(vectors) + batch_size - 1) // batch_size
             start = time.perf_counter()
             for offset in range(0, len(vectors), batch_size):
-                self._index.upsert(vectors=vectors[offset : offset + batch_size])
+                self._upsert_batch(vectors[offset : offset + batch_size])
             duration_ms = (time.perf_counter() - start) * 1000
             metrics.observe("rag_pinecone_upsert_duration_ms", duration_ms)
             metrics.observe("rag_pinecone_upsert_batches", batch_count)
@@ -92,6 +96,13 @@ class PineconeHybridIndex:
                 duration_ms,
                 extra={"vector_count": len(vectors), "duration_ms": duration_ms},
             )
+
+    @retry_on_transient()
+    def _upsert_batch(self, batch: list[dict[str, Any]]) -> None:
+        """Upsert a single bounded batch, retrying only this batch on a
+        transient failure. Kept separate from :meth:`upsert` so a retry does not
+        re-send batches that already succeeded."""
+        self._index.upsert(vectors=batch)
 
     @retry_on_transient()
     def delete_document(self, document_id: str) -> None:

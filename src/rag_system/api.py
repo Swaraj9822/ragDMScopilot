@@ -95,6 +95,17 @@ async def lifespan(app: FastAPI):
                 "unavailable until the database is reachable and migrated."
             )
 
+        # The /metrics scrape endpoint is only token-gated when RAG_METRICS_TOKEN
+        # is set; otherwise it stays open (backward compatible). With auth on,
+        # an open metrics endpoint is almost certainly unintended, so surface it
+        # at boot as a conscious choice rather than a forgotten default.
+        if not settings.metrics_token:
+            logger.warning(
+                "RAG_METRICS_TOKEN is unset while auth is enabled: the /metrics "
+                "endpoint is publicly reachable. Set RAG_METRICS_TOKEN or block "
+                "/metrics at the reverse proxy."
+            )
+
     if settings.tracing_enabled:
         _start_observability_platform()
 
@@ -421,26 +432,39 @@ async def log_requests(request: Request, call_next):
 # ---------------------------------------------------------------------------
 
 
+@lru_cache(maxsize=1)
+def _endpoint_catalog() -> tuple[str, ...]:
+    """Build the self-describing endpoint listing once.
+
+    Routes are fixed after startup, so the catalog is computed on first request
+    and cached instead of re-derived from ``app.routes`` on every call to
+    ``root()``.
+    """
+    return tuple(
+        sorted(
+            f"{method} {route.path}"
+            for route in app.routes
+            if isinstance(route, APIRoute)
+            for method in (route.methods or set())
+            if method not in ("HEAD", "OPTIONS")
+        )
+    )
+
+
 @app.get("/", dependencies=[Depends(get_current_user)])
 def root() -> dict[str, object]:
     """Service metadata plus a live, self-describing endpoint listing.
 
     The endpoint list is generated from the router so it can never drift from
     the actual routes (the previous hand-maintained catalog had already fallen
-    out of sync). See ``/docs`` for full request/response schemas.
+    out of sync). It is computed once and cached (see ``_endpoint_catalog``).
+    See ``/docs`` for full request/response schemas.
     """
-    endpoints = sorted(
-        f"{method} {route.path}"
-        for route in app.routes
-        if isinstance(route, APIRoute)
-        for method in (route.methods or set())
-        if method not in ("HEAD", "OPTIONS")
-    )
     return {
         "name": "Production RAG",
         "status": "ok",
         "docs": "/docs",
-        "endpoints": endpoints,
+        "endpoints": list(_endpoint_catalog()),
     }
 
 

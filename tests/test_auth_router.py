@@ -81,15 +81,20 @@ def test_register_invalid_email_returns_422():
 # --- login -----------------------------------------------------------------
 
 
-def test_login_returns_token_pair():
+def test_login_returns_access_token_and_sets_refresh_cookie():
     client = _build_client(RAG_AUTH_ALLOW_REGISTRATION=True)
     _register(client)
     resp = _login(client)
     assert resp.status_code == 200
     body = resp.json()
-    assert body["access_token"] and body["refresh_token"]
+    assert body["access_token"]
     assert body["token_type"] == "bearer"
     assert body["expires_in"] > 0
+    # The refresh token is delivered only as an httpOnly cookie, never in body.
+    assert "refresh_token" not in body
+    assert client.cookies.get("refresh_token")
+    set_cookie = resp.headers["set-cookie"].lower()
+    assert "httponly" in set_cookie
 
 
 def test_login_wrong_password_returns_401():
@@ -102,13 +107,39 @@ def test_login_wrong_password_returns_401():
 # --- refresh / logout ------------------------------------------------------
 
 
-def test_refresh_returns_new_pair():
+def test_refresh_via_cookie_rotates_and_sets_new_cookie():
     client = _build_client(RAG_AUTH_ALLOW_REGISTRATION=True)
     _register(client)
-    refresh_token = _login(client).json()["refresh_token"]
-    resp = client.post("/auth/refresh", json={"refresh_token": refresh_token})
+    _login(client)
+    original = client.cookies.get("refresh_token")
+    assert original
+
+    # No body: the TestClient replays the httpOnly cookie set at login.
+    resp = client.post("/auth/refresh")
     assert resp.status_code == 200
-    assert resp.json()["refresh_token"] != refresh_token
+    assert "refresh_token" not in resp.json()
+    assert resp.json()["access_token"]
+    # The cookie was rotated to a new value.
+    assert client.cookies.get("refresh_token") != original
+
+
+def test_refresh_via_body_fallback_still_works():
+    # Non-browser clients may still present the token in the body.
+    client = _build_client(RAG_AUTH_ALLOW_REGISTRATION=True)
+    _register(client)
+    _login(client)
+    token = client.cookies.get("refresh_token")
+    client.cookies.clear()
+
+    resp = client.post("/auth/refresh", json={"refresh_token": token})
+    assert resp.status_code == 200
+    assert resp.json()["access_token"]
+
+
+def test_refresh_missing_token_returns_401():
+    client = _build_client(RAG_AUTH_ALLOW_REGISTRATION=True)
+    resp = client.post("/auth/refresh")
+    assert resp.status_code == 401
 
 
 def test_refresh_invalid_token_returns_401():
@@ -117,14 +148,27 @@ def test_refresh_invalid_token_returns_401():
     assert resp.status_code == 401
 
 
-def test_logout_returns_204_and_invalidates_refresh():
+def test_logout_clears_cookie_and_invalidates_refresh():
     client = _build_client(RAG_AUTH_ALLOW_REGISTRATION=True)
     _register(client)
-    refresh_token = _login(client).json()["refresh_token"]
+    _login(client)
+    assert client.cookies.get("refresh_token")
 
-    assert client.post("/auth/logout", json={"refresh_token": refresh_token}).status_code == 204
-    # Once logged out the refresh token no longer works.
-    assert client.post("/auth/refresh", json={"refresh_token": refresh_token}).status_code == 401
+    # Logout reads the cookie; no body required.
+    assert client.post("/auth/logout").status_code == 204
+    # The refresh cookie is expired/cleared by the response.
+    assert not client.cookies.get("refresh_token")
+
+
+def test_logout_makes_refresh_token_unusable():
+    client = _build_client(RAG_AUTH_ALLOW_REGISTRATION=True)
+    _register(client)
+    _login(client)
+    token = client.cookies.get("refresh_token")
+
+    assert client.post("/auth/logout").status_code == 204
+    # Even replayed via body, the revoked token can no longer be refreshed.
+    assert client.post("/auth/refresh", json={"refresh_token": token}).status_code == 401
 
 
 # --- protected /auth/me ----------------------------------------------------

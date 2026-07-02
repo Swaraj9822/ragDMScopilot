@@ -13,6 +13,7 @@ from rag_system.copilot import (
     DatabaseCopilotService,
     PostgresCopilotExecutor,
     SqlValidationError,
+    _strip_sql_comments,
     build_database_answer_prompt,
     build_sql_prompt,
     format_database_answer,
@@ -67,6 +68,42 @@ def test_sql_guard_rejects_unsafe_sql(sql: str) -> None:
 
     with pytest.raises(SqlValidationError):
         guard.validate(sql)
+
+
+def test_strip_sql_comments_handles_nested_block_comments() -> None:
+    # Postgres block comments nest. The stripper must consume the whole nested
+    # comment, leaving no dangling */ remnant.
+    stripped = _strip_sql_comments("select /* a /* b */ c */ 1")
+    assert "*/" not in stripped
+    assert "select" in stripped
+    assert "1" in stripped
+
+
+def test_strip_sql_comments_preserves_markers_inside_string_literal() -> None:
+    # Comment markers inside a string literal must be preserved verbatim.
+    stripped = _strip_sql_comments("select '/* not a comment */' as x")
+    assert "/* not a comment */" in stripped
+
+
+def test_sql_guard_accepts_query_with_nested_comment() -> None:
+    guard = CopilotSqlGuard(_catalog(), max_rows=50)
+
+    sql = guard.validate(
+        "select invoice_date, sum(net_amount) as revenue /* outer /* inner */ back */ "
+        "from sales_invoice group by invoice_date"
+    )
+
+    assert "*/" not in sql
+    assert "LIMIT 50" in sql
+
+
+def test_sql_guard_rejects_write_hidden_in_nested_comment_via_failclose() -> None:
+    # A write keyword smuggled after a nested comment must still be rejected
+    # (the remnant is fully stripped, so the keyword is evaluated normally).
+    guard = CopilotSqlGuard(_catalog(), max_rows=50)
+
+    with pytest.raises(SqlValidationError):
+        guard.validate("select /* /* */ */ 1; drop table sales_invoice")
 
 
 def test_prompts_include_business_context() -> None:

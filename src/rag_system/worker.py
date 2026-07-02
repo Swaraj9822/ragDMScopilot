@@ -12,7 +12,7 @@ from rag_system.observability import (
 )
 from rag_system.observability_tracing import get_span_recorder
 from rag_system.queue import ReceivedIngestionJob, SqsIngestionQueue
-from rag_system.service import RagService
+from rag_system.service import DocumentDeletedError, RagService
 
 logger = get_logger(__name__)
 
@@ -107,6 +107,17 @@ class IngestionWorker:
                 await self._service.process_document_job(job)
             self._queue.delete(message)
             metrics.increment("rag_ingestion_jobs_completed_total")
+        except DocumentDeletedError:
+            # The document was deleted before this job ran (`deleted` is a
+            # terminal state), so the job can never succeed. Treat it as a
+            # successful no-op: delete the message so it does not redeliver
+            # until maxReceiveCount and pile up in the DLQ as noise.
+            self._queue.delete(message)
+            metrics.increment("rag_ingestion_jobs_skipped_deleted_total")
+            logger.info(
+                "Ingestion job skipped: document already deleted",
+                extra={"document_id": job.document_id, "version": job.version},
+            )
         except Exception:
             metrics.increment("rag_ingestion_jobs_failed_total")
             logger.error(

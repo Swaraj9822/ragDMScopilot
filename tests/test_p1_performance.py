@@ -80,6 +80,19 @@ def test_embed_runs_calls_concurrently() -> None:
     assert max_active > 1
 
 
+def test_embedder_reuses_instance_pool_across_calls() -> None:
+    # Item 5: the embed pool is created once and reused, not rebuilt per call.
+    embedder = _embedder(max_workers=8)
+    embedder._embed_single = lambda text: [0.0, 0.0, 0.0]  # type: ignore[method-assign]
+
+    embedder._embed(["a", "b"])
+    first_pool = embedder._executor
+    assert first_pool is not None
+
+    embedder._embed(["c", "d"])
+    assert embedder._executor is first_pool
+
+
 def test_single_worker_setting_embeds_serially() -> None:
     embedder = _embedder(max_workers=1)
     embedder._embed_single = lambda text: [1.0, 1.0, 1.0]  # type: ignore[method-assign]
@@ -137,6 +150,38 @@ def test_upsert_empty_does_nothing() -> None:
     assert raw.upsert_calls == []
 
 
+def test_upsert_retries_only_failing_batch(monkeypatch) -> None:
+    # A transient failure must re-send only the offending batch, not re-run the
+    # batches that already succeeded (the retry lives on _upsert_batch, not on
+    # upsert). Silence tenacity's back-off so the test stays fast.
+    monkeypatch.setattr(
+        PineconeHybridIndex._upsert_batch.retry, "sleep", lambda *a, **k: None
+    )
+
+    class FlakyIndex:
+        def __init__(self) -> None:
+            self.upsert_calls: list[int] = []
+            self._failed = False
+
+        def upsert(self, vectors) -> None:
+            self.upsert_calls.append(len(vectors))
+            # Fail once on the final (50-vector) batch, then succeed on retry.
+            if len(vectors) == 50 and not self._failed:
+                self._failed = True
+                raise RuntimeError("transient pinecone error")
+
+    index = object.__new__(PineconeHybridIndex)
+    raw = FlakyIndex()
+    index._index = raw
+    index._upsert_batch_size = 100
+
+    index.upsert(_embedded(250))
+
+    # Batches 1 and 2 ran exactly once; only the failing 50-batch was retried.
+    # A whole-method retry would have re-run the two 100-vector batches.
+    assert raw.upsert_calls == [100, 100, 50, 50]
+
+
 # ---------------------------------------------------------------------------
 # Finding 3 — concurrent list_documents.
 # ---------------------------------------------------------------------------
@@ -186,6 +231,22 @@ def test_list_documents_returns_all_sorted_by_title() -> None:
     assert [r.title for r in listed] == ["apple", "Mango", "Zebra"]
     # The per-document reads overlapped rather than running strictly serially.
     assert store.concurrent_reads > 1
+
+
+def test_list_documents_reuses_instance_pool() -> None:
+    # Item 5: the Documents-listing pool is created once and reused across calls.
+    records = [
+        DocumentRecord(id=f"d{i}", title=f"t{i}", version="v", s3_uri=f"s3://b/{i}", status=DocumentStatus.indexed)
+        for i in range(3)
+    ]
+    service = _list_service(ListStore(records), max_workers=8)
+
+    service.list_documents()
+    first_pool = service._document_list_executor
+    assert first_pool is not None
+
+    service.list_documents()
+    assert service._document_list_executor is first_pool
 
 
 def test_list_documents_empty_corpus() -> None:

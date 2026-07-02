@@ -95,6 +95,8 @@ class RagService:
         self._reranker: BedrockCohereReranker | None = None
         self._generator: GroundedAnswerGenerator | None = None
         self._documents: dict[str, DocumentRecord] = {}
+        # Shared pool for the Documents-tab listing fan-out (created lazily).
+        self._document_list_executor: ThreadPoolExecutor | None = None
         logger.info(
             "RagService initialised (rerank=%s)",
             "enabled" if settings.rerank_enabled else "disabled",
@@ -239,7 +241,11 @@ class RagService:
         if record is None:
             raise ValueError(f"Document record not found: {job.document_id}")
         if record.status == DocumentStatus.deleted:
-            raise ValueError(f"Document was deleted before ingestion: {job.document_id}")
+            # Terminal state: the document was deleted before this job ran, so
+            # it can never succeed. Signal with DocumentDeletedError (not a bare
+            # ValueError) so the worker treats it as a no-op and removes the
+            # message instead of retrying it to the DLQ.
+            raise DocumentDeletedError(job.document_id)
         if record.version != job.version:
             raise ValueError(
                 f"Document version mismatch for {job.document_id}: "
@@ -282,7 +288,7 @@ class RagService:
         try:
             # --- Parsing stage (R12.2, R12.4, R12.5, R12.7) ---
             record = record.model_copy(update={"status": DocumentStatus.parsing, "error": None})
-            self._save_document_record(record)
+            await asyncio.to_thread(self._save_document_record, record)
             with recorder.record_span("document parsing") as span:
                 parsed = await self.parser.parse(document_id, version, filename, content)
                 recorder.set_ingestion_attributes(
@@ -291,13 +297,15 @@ class RagService:
                     document_version=version if version is not None else None,
                     source_filename=filename,
                 )
-            self._store.put_json(parsed_key(document_id, version), parsed.model_dump())
+            await asyncio.to_thread(
+                self._store.put_json, parsed_key(document_id, version), parsed.model_dump()
+            )
 
             # --- Chunking stage (R12.2, R12.4, R12.5, R12.7) ---
             record = record.model_copy(update={"status": DocumentStatus.chunking, "error": None})
-            self._save_document_record(record)
+            await asyncio.to_thread(self._save_document_record, record)
             with recorder.record_span("chunking") as span:
-                chunks = self.chunker.chunk(parsed)
+                chunks = await asyncio.to_thread(self.chunker.chunk, parsed)
                 recorder.set_ingestion_attributes(
                     span,
                     document_id=document_id if document_id is not None else None,
@@ -309,13 +317,13 @@ class RagService:
                 len(chunks),
                 extra={**log_extra, "chunk_count": len(chunks)},
             )
-            self._store.put_chunks(document_id, version, chunks)
+            await asyncio.to_thread(self._store.put_chunks, document_id, version, chunks)
 
             # --- Embedding stage (R12.2, R12.4, R12.5, R12.7) ---
             record = record.model_copy(update={"status": DocumentStatus.embedding, "error": None})
-            self._save_document_record(record)
+            await asyncio.to_thread(self._save_document_record, record)
             with recorder.record_span("dense embedding") as span:
-                embedded = self.embedder.embed_chunks(chunks)
+                embedded = await asyncio.to_thread(self.embedder.embed_chunks, chunks)
                 recorder.set_ingestion_attributes(
                     span,
                     document_id=document_id if document_id is not None else None,
@@ -325,13 +333,15 @@ class RagService:
 
             if self._settings.sparse_enabled:
                 with timed(logger, "BM25 sparse encoding", **log_extra):
-                    sparse_vectors = self.sparse_encoder.encode_documents([c.text for c in chunks])
+                    sparse_vectors = await asyncio.to_thread(
+                        self.sparse_encoder.encode_documents, [c.text for c in chunks]
+                    )
                 for ec, sv in zip(embedded, sparse_vectors, strict=True):
                     ec.sparse_vector = sv
 
             # --- Indexing stage (R12.2, R12.4, R12.5, R12.7) ---
             with recorder.record_span("Pinecone upsert") as span:
-                self.index.upsert(embedded)
+                await asyncio.to_thread(self.index.upsert, embedded)
                 recorder.set_ingestion_attributes(
                     span,
                     document_id=document_id if document_id is not None else None,
@@ -339,7 +349,8 @@ class RagService:
                     source_filename=filename,
                 )
 
-            self._store.put_json(
+            await asyncio.to_thread(
+                self._store.put_json,
                 embedding_manifest_key(document_id, version),
                 {
                     "document_id": document_id,
@@ -356,7 +367,7 @@ class RagService:
             )
 
             final = record.model_copy(update={"status": DocumentStatus.indexed, "error": None})
-            self._save_document_record(final)
+            await asyncio.to_thread(self._save_document_record, final)
             logger.info("Ingestion complete for %s", filename, extra=log_extra)
             return final
         except DocumentDeletedError:
@@ -381,7 +392,7 @@ class RagService:
                 update={"status": DocumentStatus.failed, "error": str(exc)}
             )
             try:
-                self._save_document_record(failed)
+                await asyncio.to_thread(self._save_document_record, failed)
             except DocumentDeletedError:
                 # Deletion also won the race against the failure write — the
                 # document is intentionally gone, so don't record a failure.
@@ -466,21 +477,39 @@ class RagService:
             logger.info("Listed 0 documents")
             return []
 
-        workers = min(
-            getattr(self._settings, "document_list_max_workers", 16), len(document_ids)
+        max_workers = max(
+            1, getattr(self._settings, "document_list_max_workers", 16)
         )
-        if workers <= 1:
+        if max_workers <= 1 or len(document_ids) == 1:
             fetched = [self.get_document(document_id) for document_id in document_ids]
         else:
-            with ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="doc-list"
-            ) as executor:
-                fetched = list(executor.map(self.get_document, document_ids))
+            fetched = list(
+                self._get_document_list_executor(max_workers).map(
+                    self.get_document, document_ids
+                )
+            )
 
         records = [record for record in fetched if record is not None]
         records.sort(key=lambda r: r.title.lower())
         logger.info("Listed %d documents", len(records))
         return records
+
+    def _get_document_list_executor(self, max_workers: int) -> ThreadPoolExecutor:
+        """Return the shared Documents-listing pool, created once on first use.
+
+        Sized to the configured maximum (not the first call's document count) so
+        later, larger listings keep their full concurrency. Reused across
+        ``GET /documents`` calls so the tab does not create and tear down a
+        thread pool on every load. ``getattr`` keeps instances built via
+        ``object.__new__`` (tests) working without ``__init__``.
+        """
+        executor = getattr(self, "_document_list_executor", None)
+        if executor is None:
+            executor = ThreadPoolExecutor(
+                max_workers=max_workers, thread_name_prefix="doc-list"
+            )
+            self._document_list_executor = executor
+        return executor
 
     def _save_document_record(self, record: DocumentRecord) -> None:
         key = document_record_key(record.id)

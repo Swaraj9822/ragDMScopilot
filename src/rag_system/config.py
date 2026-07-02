@@ -303,6 +303,32 @@ class Settings(BaseSettings):
             )
         return value
 
+    # --- Refresh-token cookie ---
+    # The refresh token is delivered to browsers as an httpOnly cookie (never in
+    # the JSON body) so page JavaScript — and thus an XSS payload — cannot read
+    # it. These knobs tune the cookie for the deployment's origin topology:
+    #   * Same-origin console + API: SameSite=Lax, Secure=True is ideal.
+    #   * Cross-origin console (different host/port, the dev default): the cookie
+    #     must be SameSite=None; Secure so the browser sends it on the
+    #     credentialed cross-site refresh call. Browsers treat localhost as a
+    #     secure context, so None+Secure also works over http://localhost in dev.
+    #   * Plain-http, non-localhost dev: set RAG_AUTH_COOKIE_SECURE=false (and
+    #     SameSite=Lax) so the browser will store the cookie.
+    auth_cookie_secure: bool = Field(default=True, alias="RAG_AUTH_COOKIE_SECURE")
+    auth_cookie_samesite: str = Field(default="none", alias="RAG_AUTH_COOKIE_SAMESITE")
+    auth_cookie_domain: str | None = Field(default=None, alias="RAG_AUTH_COOKIE_DOMAIN")
+
+    @field_validator("auth_cookie_samesite")
+    @classmethod
+    def _validate_cookie_samesite(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"lax", "strict", "none"}:
+            raise ValueError(
+                f"invalid auth cookie SameSite {value!r}: must be one of "
+                "'lax', 'strict', or 'none'"
+            )
+        return normalized
+
     def require_jwt_secret(self) -> str:
         """Return the configured JWT secret or raise when auth is misconfigured.
 

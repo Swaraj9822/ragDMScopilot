@@ -124,10 +124,25 @@ def _strip_sql_comments(sql: str) -> str:
             out.append(" ")
             continue
         if ch == "/" and i + 1 < n and sql[i + 1] == "*":
+            # Postgres block comments nest: /* outer /* inner */ still outer */.
+            # Track depth so we consume the whole nested comment instead of
+            # stopping at the first */ and leaving a dangling */ remnant in the
+            # SQL (which would turn a legitimate nested-comment query into a
+            # confusing rejection). Note: dollar-quoted strings ($$...$$ /
+            # $tag$...$tag$) are NOT handled here; any comment markers inside one
+            # are treated as real comments. That is acceptable for this guard
+            # because only aggregate SELECTs pass validation, but worth knowing.
+            depth = 1
             i += 2
-            while i + 1 < n and not (sql[i] == "*" and sql[i + 1] == "/"):
-                i += 1
-            i += 2  # skip the closing */
+            while i < n and depth > 0:
+                if sql[i] == "/" and i + 1 < n and sql[i + 1] == "*":
+                    depth += 1
+                    i += 2
+                elif sql[i] == "*" and i + 1 < n and sql[i + 1] == "/":
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
             out.append(" ")
             continue
         out.append(ch)

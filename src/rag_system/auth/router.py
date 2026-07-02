@@ -7,10 +7,11 @@ exists); ``/auth/me`` is protected and echoes the authenticated user. Mount with
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 
 from rag_system.auth.dependencies import get_auth_service, get_current_user
 from rag_system.auth.models import (
+    AccessTokenResponse,
     LoginRequest,
     LogoutRequest,
     RefreshRequest,
@@ -27,13 +28,57 @@ from rag_system.auth.service import (
     RegistrationClosedError,
 )
 from rag_system.auth.tokens import TokenError
-from rag_system.config import get_settings
+from rag_system.config import Settings, get_settings
 from rag_system.observability import get_logger
 from rag_system.rate_limit import SlidingWindowRateLimiter, rate_limit
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+#: Name of the httpOnly cookie carrying the refresh token. Scoped to ``/auth``
+#: so the browser only sends it to the refresh/logout endpoints, not on every
+#: API call.
+REFRESH_COOKIE_NAME = "refresh_token"
+_REFRESH_COOKIE_PATH = "/auth"
+
+
+def _set_refresh_cookie(response: Response, token: str, settings: Settings) -> None:
+    """Attach the rotated refresh token as an httpOnly cookie.
+
+    ``httponly`` keeps it out of ``document.cookie`` (and thus out of reach of an
+    XSS payload); ``secure``/``samesite`` are configured for the deployment's
+    origin topology (see ``Settings.auth_cookie_*``).
+    """
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=token,
+        max_age=settings.refresh_token_ttl_days * 24 * 60 * 60,
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite=settings.auth_cookie_samesite,
+        domain=settings.auth_cookie_domain,
+        path=_REFRESH_COOKIE_PATH,
+    )
+
+
+def _clear_refresh_cookie(response: Response, settings: Settings) -> None:
+    response.delete_cookie(
+        key=REFRESH_COOKIE_NAME,
+        path=_REFRESH_COOKIE_PATH,
+        domain=settings.auth_cookie_domain,
+        secure=settings.auth_cookie_secure,
+        httponly=True,
+        samesite=settings.auth_cookie_samesite,
+    )
+
+
+def _access_body(pair: TokenResponse) -> AccessTokenResponse:
+    return AccessTokenResponse(
+        access_token=pair.access_token,
+        token_type=pair.token_type,
+        expires_in=pair.expires_in,
+    )
 
 # Shared per-process limiter for credential-bearing endpoints. A per-minute
 # allowance of 0 disables throttling. Built once at import from settings; the
@@ -81,16 +126,22 @@ def register(
 
 @router.post(
     "/login",
-    response_model=TokenResponse,
+    response_model=AccessTokenResponse,
     dependencies=_auth_rate_limit("login"),
 )
 def login(
     request: LoginRequest,
+    response: Response,
     auth_service: AuthService = Depends(get_auth_service),
-) -> TokenResponse:
-    """Exchange email + password for a signed access token."""
+    settings: Settings = Depends(get_settings),
+) -> AccessTokenResponse:
+    """Exchange email + password for an access token (+ refresh cookie).
+
+    The refresh token is set as an httpOnly cookie rather than returned in the
+    body, so it is never readable by page JavaScript.
+    """
     try:
-        return auth_service.login(request.email, request.password)
+        pair = auth_service.login(request.email, request.password)
     except (InvalidCredentialsError, InactiveUserError) as exc:
         # Use 401 for both so a disabled account is not distinguishable from a
         # wrong password to an unauthenticated caller.
@@ -104,26 +155,41 @@ def login(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+    _set_refresh_cookie(response, pair.refresh_token, settings)
+    return _access_body(pair)
 
 
 @router.post(
     "/refresh",
-    response_model=TokenResponse,
+    response_model=AccessTokenResponse,
     dependencies=_auth_rate_limit("refresh"),
 )
 def refresh(
-    request: RefreshRequest,
+    response: Response,
+    body: RefreshRequest | None = None,
+    refresh_cookie: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
     auth_service: AuthService = Depends(get_auth_service),
-) -> TokenResponse:
-    """Exchange a valid refresh token for a new access + refresh token pair.
+    settings: Settings = Depends(get_settings),
+) -> AccessTokenResponse:
+    """Rotate the refresh token and return a fresh access token.
 
-    The presented refresh token is rotated (revoked) and replaced. A revoked or
-    reused token is rejected with 401; reuse additionally revokes the user's
-    whole token family server-side.
+    The refresh token is read from the httpOnly cookie (browsers) or, as a
+    fallback, the request body (non-browser clients). The rotated token is set
+    as a new cookie; the body carries only the access token. A revoked or reused
+    token is rejected with 401 and the stale cookie is cleared; reuse also
+    revokes the user's whole token family server-side.
     """
+    token = refresh_cookie or (body.refresh_token if body else None)
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing refresh token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
-        return auth_service.refresh(request.refresh_token)
+        pair = auth_service.refresh(token)
     except InvalidRefreshTokenError as exc:
+        _clear_refresh_cookie(response, settings)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired refresh token.",
@@ -133,6 +199,8 @@ def refresh(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+    _set_refresh_cookie(response, pair.refresh_token, settings)
+    return _access_body(pair)
 
 
 @router.post(
@@ -141,17 +209,24 @@ def refresh(
     response_class=Response,
 )
 def logout(
-    request: LogoutRequest,
+    response: Response,
+    body: LogoutRequest | None = None,
+    refresh_cookie: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
     auth_service: AuthService = Depends(get_auth_service),
+    settings: Settings = Depends(get_settings),
 ) -> Response:
-    """Revoke a refresh token so it can no longer be rotated.
+    """Revoke the refresh token and clear its cookie.
 
-    Idempotent — revoking an unknown or already-revoked token still returns 204.
-    Access tokens already issued remain valid until they expire (they are
-    stateless); keep their TTL short.
+    Idempotent — revoking an unknown or already-revoked token (or none at all)
+    still returns 204 and clears the cookie. Access tokens already issued remain
+    valid until they expire (they are stateless); keep their TTL short.
     """
-    auth_service.logout(request.refresh_token)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    token = refresh_cookie or (body.refresh_token if body else None)
+    if token:
+        auth_service.logout(token)
+    _clear_refresh_cookie(response, settings)
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response
 
 
 @router.get("/me", response_model=UserPublic)

@@ -51,6 +51,11 @@ _AUTH_DEFAULTS = {
     "RAG_JWT_ISSUER": "production-rag-tests",
     "RAG_AUTH_ENABLED": True,
     "RAG_AUTH_RATE_LIMIT_PER_MINUTE": 0,  # disable throttling in most tests
+    # The refresh cookie must round-trip over the TestClient's plain-http
+    # transport, so disable Secure and use SameSite=Lax (httpx only replays
+    # Secure cookies over https).
+    "RAG_AUTH_COOKIE_SECURE": False,
+    "RAG_AUTH_COOKIE_SAMESITE": "lax",
     # Force the DB connection settings unset so tests never inherit real
     # COPILOT_DB_* values from a local .env (which would let schema.connect()
     # reach a live database). Tests that need storage use injected doubles.

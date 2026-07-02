@@ -15,7 +15,13 @@ class BedrockTitanEmbedder:
         self._client = settings.bedrock_runtime_client()
         self._model_id = settings.bedrock_embedding_model_id
         self._dimension = settings.embedding_dimension
-        self._max_workers = max(1, settings.embedding_max_workers)
+        # Config validator already enforces [1, 1000]; no local clamp needed.
+        self._max_workers = settings.embedding_max_workers
+        # Instance-level pool, created once on first use and reused across
+        # documents, so a multi-hundred-chunk upload no longer pays thread
+        # create/teardown on every embed call. Skipped entirely in the serial
+        # path (max_workers <= 1 or a single text).
+        self._executor: ThreadPoolExecutor | None = None
 
     @retry_on_transient()
     def _embed_single(self, text: str) -> list[float]:
@@ -62,11 +68,21 @@ class BedrockTitanEmbedder:
         """
         if len(texts) <= 1 or self._max_workers <= 1:
             return [self._embed_single(text) for text in texts]
-        workers = min(self._max_workers, len(texts))
-        with ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="embed"
-        ) as executor:
-            return list(executor.map(self._embed_single, texts))
+        return list(self._get_executor().map(self._embed_single, texts))
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        """Return the shared embed pool, creating it once on first use.
+
+        Uses ``getattr`` so instances built via ``object.__new__`` (tests) that
+        never ran ``__init__`` still work.
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None:
+            executor = ThreadPoolExecutor(
+                max_workers=self._max_workers, thread_name_prefix="embed"
+            )
+            self._executor = executor
+        return executor
 
     def embed_chunks(self, chunks: list[Chunk]) -> list[EmbeddedChunk]:
         if not chunks:

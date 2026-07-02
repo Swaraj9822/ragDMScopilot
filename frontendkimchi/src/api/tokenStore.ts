@@ -1,23 +1,28 @@
-// Low-level access/refresh token storage. Kept dependency-free (no imports from
-// the API client) so client.ts can read tokens without a circular import.
+// Low-level access-token storage. Kept dependency-free (no imports from the API
+// client) so client.ts can read the token without a circular import.
 //
-// Tokens live in memory for speed and are mirrored to localStorage so a page
-// reload keeps the session. localStorage is readable by any script on the page,
-// so this trades some XSS exposure for persistence — an accepted tradeoff for an
-// internal tool. Keep access-token TTLs short (the backend default is 60 min).
+// The access token lives in memory and is mirrored to localStorage so a page
+// reload keeps the session; it is short-lived (backend default 60 min).
+//
+// SECURITY: the refresh token is NOT stored here. It is delivered as an
+// httpOnly cookie the browser manages, so page JavaScript — and therefore any
+// XSS payload — cannot read it. A refresh is performed by calling
+// /auth/refresh with credentials; the browser attaches the cookie automatically.
 
 import { LOCALSTORAGE_KEYS } from "../lib/constants";
-
-export interface TokenPair {
-  access: string;
-  refresh: string;
-}
 
 type Listener = () => void;
 
 let accessToken: string | null = readStored(LOCALSTORAGE_KEYS.authAccessToken);
-let refreshToken: string | null = readStored(LOCALSTORAGE_KEYS.authRefreshToken);
 const listeners = new Set<Listener>();
+
+// Migration/hardening: purge any refresh token a previous build persisted to
+// localStorage so a formerly-stored token cannot linger in JS-readable storage.
+try {
+  localStorage.removeItem(LOCALSTORAGE_KEYS.authRefreshToken);
+} catch {
+  // Storage unavailable (private mode / SSR) — nothing to purge.
+}
 
 function readStored(key: string): string | null {
   try {
@@ -44,30 +49,22 @@ export function getAccessToken(): string | null {
   return accessToken;
 }
 
-export function getRefreshToken(): string | null {
-  return refreshToken;
-}
-
 export function hasSession(): boolean {
-  return accessToken !== null && refreshToken !== null;
+  return accessToken !== null;
 }
 
-/** Persist a freshly issued token pair and notify subscribers. */
-export function setTokens(pair: TokenPair): void {
-  accessToken = pair.access;
-  refreshToken = pair.refresh;
-  writeStored(LOCALSTORAGE_KEYS.authAccessToken, pair.access);
-  writeStored(LOCALSTORAGE_KEYS.authRefreshToken, pair.refresh);
+/** Persist a freshly issued access token and notify subscribers. */
+export function setAccessToken(access: string): void {
+  accessToken = access;
+  writeStored(LOCALSTORAGE_KEYS.authAccessToken, access);
   notify();
 }
 
 /** Drop the session (logout or unrecoverable auth failure) and notify subscribers. */
 export function clearTokens(): void {
-  const had = accessToken !== null || refreshToken !== null;
+  const had = accessToken !== null;
   accessToken = null;
-  refreshToken = null;
   writeStored(LOCALSTORAGE_KEYS.authAccessToken, null);
-  writeStored(LOCALSTORAGE_KEYS.authRefreshToken, null);
   if (had) notify();
 }
 

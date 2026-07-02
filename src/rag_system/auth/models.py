@@ -20,6 +20,7 @@ __all__ = [
     "RefreshRequest",
     "LogoutRequest",
     "TokenResponse",
+    "AccessTokenResponse",
     "UserPublic",
     "UserRecord",
 ]
@@ -62,11 +63,13 @@ class LoginRequest(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str = Field(min_length=1, max_length=512)
+    # Optional: browsers send the refresh token via the httpOnly cookie, so the
+    # body may be empty. Non-browser clients may still supply it here.
+    refresh_token: str | None = Field(default=None, max_length=512)
 
 
 class LogoutRequest(BaseModel):
-    refresh_token: str = Field(min_length=1, max_length=512)
+    refresh_token: str | None = Field(default=None, max_length=512)
 
 
 class TokenResponse(BaseModel):
@@ -74,6 +77,18 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int  # seconds until the access token expires
+
+
+class AccessTokenResponse(BaseModel):
+    """HTTP response body for login/refresh: the access token only.
+
+    The refresh token is intentionally omitted from the body and delivered as an
+    httpOnly cookie so it is never exposed to page JavaScript (XSS-theft).
+    """
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
 
 
 class UserPublic(BaseModel):

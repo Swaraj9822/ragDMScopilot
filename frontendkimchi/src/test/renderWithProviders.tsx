@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "../hooks/useTheme";
 import { ToastProvider } from "../hooks/useToast";
 import { AuthProvider } from "../hooks/useAuth";
-import { setTokens } from "../api/tokenStore";
+import { setAccessToken } from "../api/tokenStore";
 
 export function makeTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -26,7 +26,7 @@ export function renderWithProviders(ui: ReactElement, options: Options = {}) {
   // Seed an authenticated session so the app shell renders. Auth is not what
   // these tests exercise; the /auth/me handler in test/server.ts resolves the
   // user. Cleared between tests by test/setup.ts.
-  setTokens({ access: "test-access-token", refresh: "test-refresh-token" });
+  setAccessToken("test-access-token");
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>
       <ThemeProvider>

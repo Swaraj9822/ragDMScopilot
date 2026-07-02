@@ -1,7 +1,7 @@
 // Typed fetch client. All network access funnels through here so page
 // components never call fetch directly.
 
-import { clearTokens, getAccessToken, getRefreshToken, setTokens } from "./tokenStore";
+import { clearTokens, getAccessToken, setAccessToken } from "./tokenStore";
 
 export const API_BASE_URL: string =
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ??
@@ -74,6 +74,8 @@ interface RequestOptions {
   retries?: number;
   /** Skip attaching the bearer token / 401-refresh (used by the auth endpoints). */
   skipAuth?: boolean;
+  /** Forwarded to fetch — set "include" so the refresh cookie is sent/stored. */
+  credentials?: RequestCredentials;
   /** Internal: set once a request has already been retried after a token refresh. */
   _authRetried?: boolean;
 }
@@ -82,33 +84,35 @@ interface RequestOptions {
 // Token refresh (single-flight). Concurrent 401s share one refresh round-trip
 // so we never fire multiple /auth/refresh calls (which would rotate the refresh
 // token repeatedly and trip the backend's reuse detection).
+//
+// The refresh token lives in an httpOnly cookie, so we send no body and rely on
+// credentials:"include" to attach it. The response carries only the new access
+// token; the browser stores the rotated refresh cookie transparently.
 // ---------------------------------------------------------------------------
 
 let refreshPromise: Promise<boolean> | null = null;
 
 async function performRefresh(): Promise<boolean> {
-  const refresh = getRefreshToken();
-  if (!refresh) return false;
   let response: Response;
   try {
     response = await fetch(`${API_BASE_URL}/auth/refresh`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ refresh_token: refresh }),
+      headers: { Accept: "application/json" },
+      credentials: "include",
     });
   } catch {
     // Network failure — leave the session intact so the user can retry later.
     return false;
   }
   if (!response.ok) {
-    // The refresh token is invalid/expired/revoked: end the session so the app
-    // redirects to login (subscribers are notified by clearTokens).
+    // The refresh cookie is missing/invalid/expired/revoked: end the session so
+    // the app redirects to login (subscribers are notified by clearTokens).
     clearTokens();
     return false;
   }
   try {
     const data = await response.json();
-    setTokens({ access: data.access_token, refresh: data.refresh_token });
+    setAccessToken(data.access_token);
     return true;
   } catch {
     clearTokens();
@@ -137,6 +141,7 @@ async function rawRequest(
     timeoutMs = TIMEOUT_SHORT_MS,
     traceId,
     signal,
+    credentials,
   } = options;
 
   const controller = new AbortController();
@@ -164,6 +169,7 @@ async function rawRequest(
       body,
       headers: finalHeaders,
       signal: controller.signal,
+      credentials,
     });
   } catch (err) {
     if (controller.signal.aborted && controller.signal.reason instanceof TimeoutError) {
@@ -178,6 +184,7 @@ async function rawRequest(
         method,
         body,
         headers: finalHeaders,
+        credentials,
       });
     }
     throw new NetworkError((err as Error)?.message);
@@ -195,12 +202,13 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     try {
       const response = await rawRequest(path, options);
       if (!response.ok) {
-        // Access token likely expired — refresh once and retry the request.
+        // Access token likely expired — refresh once (via the httpOnly cookie)
+        // and retry the request. We always attempt the refresh: the cookie may
+        // exist even when no access token is held (e.g. after a reload).
         if (
           response.status === 401 &&
           !options.skipAuth &&
-          !options._authRetried &&
-          getRefreshToken()
+          !options._authRetried
         ) {
           const refreshed = await refreshAccessToken();
           if (refreshed) {

@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from types import SimpleNamespace
 
 from rag_system.models import Chunk, DocumentRecord, DocumentStatus, EmbeddedChunk, ParsedDocument
@@ -126,6 +128,121 @@ def test_worker_marks_failed_and_keeps_message_for_retry_on_failure() -> None:
     assert final.error == "parse boom"
     assert store.record_statuses == ["parsing", "failed"]
     assert queue.deleted == []
+
+
+def test_worker_skips_deleted_document_as_noop() -> None:
+    # Regression for item 2: a job whose document was deleted before ingestion
+    # is terminal — it can never succeed. The worker must delete the message as
+    # a no-op rather than leaving it to redeliver until it lands in the DLQ.
+    record = _record().model_copy(update={"status": DocumentStatus.deleted})
+    store = FakeStore(record)
+    service = _service(record, store, parser=FakeParser(), index=FakeIndex())
+    queue = FakeQueue([_received_job(record)])
+
+    processed = asyncio.run(IngestionWorker(service, queue).process_once())
+
+    assert processed == 1
+    # Message removed (not retried) and no pipeline work happened.
+    assert queue.deleted == ["receipt-1"]
+    assert store.record_statuses == []
+
+
+def test_worker_overlaps_blocking_ingestion_stages() -> None:
+    # Regression for item 1: the synchronous embed/upsert/persist stages must
+    # run off the event loop (via asyncio.to_thread) so multiple messages from a
+    # single poll actually overlap. The fake embedder blocks with time.sleep
+    # (NOT asyncio.sleep), so if the stage ran on the loop thread the documents
+    # would serialise and max_active would stay at 1.
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    class BlockingEmbedder:
+        def embed_chunks(self, chunks: list[Chunk]) -> list[EmbeddedChunk]:
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return [EmbeddedChunk(chunk=c, dense_vector=[0.1, 0.2]) for c in chunks]
+
+    records = [
+        DocumentRecord(
+            id=f"doc-{i}",
+            title=f"f{i}.pdf",
+            version="v",
+            s3_uri="s3://bucket/raw/doc/v/f.pdf",
+            status=DocumentStatus.queued,
+        )
+        for i in range(3)
+    ]
+    store = _MultiRecordStore(records)
+    service = object.__new__(RagService)
+    service._settings = SimpleNamespace(
+        sparse_enabled=False,
+        bedrock_embedding_model_id="embed-model",
+        s3_bucket="bucket",
+        pinecone_index_name="index",
+        ingestion_max_concurrency=4,
+    )
+    service._store = store
+    service._documents = {}
+    service._parser = FakeParser()
+    service._chunker = FakeChunker()
+    service._embedder = BlockingEmbedder()
+    service._sparse_encoder = None
+    service._index = FakeIndex()
+    service._reranker = None
+    service._generator = None
+
+    messages = [
+        ReceivedIngestionJob(
+            job=IngestionJob(
+                document_id=r.id,
+                version=r.version,
+                filename=r.title,
+                s3_uri=r.s3_uri,
+            ),
+            receipt_handle=f"receipt-{i}",
+            message_id=f"message-{i}",
+        )
+        for i, r in enumerate(records)
+    ]
+    queue = FakeQueue(messages)
+
+    processed = asyncio.run(IngestionWorker(service, queue).process_once())
+
+    assert processed == 3
+    assert len(queue.deleted) == 3
+    # Blocking stages overlapped across documents instead of running serially.
+    assert max_active > 1
+
+
+class _MultiRecordStore:
+    """Minimal multi-document store for the concurrency regression test."""
+
+    def __init__(self, records: list[DocumentRecord]) -> None:
+        self.objects: dict[str, object] = {
+            document_record_key(r.id): r.model_dump(mode="json") for r in records
+        }
+        self._lock = threading.Lock()
+
+    def get_json(self, key: str) -> object | None:
+        with self._lock:
+            return self.objects.get(key)
+
+    def put_json(self, key: str, payload: object) -> str:
+        with self._lock:
+            self.objects[key] = payload
+        return f"s3://bucket/{key}"
+
+    def get_pdf(self, document_id: str, version: str) -> bytes:
+        return b"%PDF-1.4"
+
+    def put_chunks(self, document_id: str, version: str, chunks) -> str:
+        return f"s3://bucket/chunks/{document_id}/{version}/chunks.jsonl"
 
 
 def _record() -> DocumentRecord:

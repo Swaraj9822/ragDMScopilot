@@ -177,3 +177,57 @@ def test_write_keyword_outside_comment_is_rejected() -> None:
     guard = _guard()
     with pytest.raises(SqlValidationError):
         guard.validate("select count(*) from orders where id in (delete from orders)")
+
+
+# ---------------------------------------------------------------------------
+# Finding 11 (extra) — startup warns when /metrics is open under auth.
+# ---------------------------------------------------------------------------
+
+
+def _lifespan_settings(*, metrics_token) -> SimpleNamespace:
+    return SimpleNamespace(
+        auth_enabled=True,
+        tracing_enabled=False,
+        metrics_token=metrics_token,
+        require_jwt_secret=lambda: "secret",
+    )
+
+
+def _run_lifespan() -> None:
+    import asyncio
+
+    async def _run() -> None:
+        async with api_module.lifespan(api_module.app):
+            pass
+
+    asyncio.run(_run())
+
+
+def test_startup_warns_when_metrics_open_with_auth(monkeypatch, caplog) -> None:
+    import logging
+
+    monkeypatch.setattr(
+        api_module, "get_settings", lambda: _lifespan_settings(metrics_token=None)
+    )
+    monkeypatch.setattr(api_module, "apply_auth_schema", lambda s: None)
+
+    with caplog.at_level(logging.WARNING):
+        _run_lifespan()
+
+    assert any("RAG_METRICS_TOKEN is unset" in r.getMessage() for r in caplog.records)
+
+
+def test_startup_no_warning_when_metrics_token_set(monkeypatch, caplog) -> None:
+    import logging
+
+    monkeypatch.setattr(
+        api_module, "get_settings", lambda: _lifespan_settings(metrics_token="s3cr3t")
+    )
+    monkeypatch.setattr(api_module, "apply_auth_schema", lambda s: None)
+
+    with caplog.at_level(logging.WARNING):
+        _run_lifespan()
+
+    assert not any(
+        "RAG_METRICS_TOKEN is unset" in r.getMessage() for r in caplog.records
+    )

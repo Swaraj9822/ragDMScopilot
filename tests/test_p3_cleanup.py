@@ -51,6 +51,17 @@ def test_root_lists_actual_registered_routes() -> None:
     assert set(endpoints) == live
 
 
+def test_root_endpoint_catalog_is_cached() -> None:
+    # Item 6: routes are fixed after startup, so the catalog is computed once
+    # and cached rather than rebuilt from app.routes on every request.
+    api_module._endpoint_catalog.cache_clear()
+    first = api_module._endpoint_catalog()
+    second = api_module._endpoint_catalog()
+    # Same cached tuple object is returned (not recomputed).
+    assert first is second
+    assert api_module._endpoint_catalog.cache_info().hits >= 1
+
+
 # ---------------------------------------------------------------------------
 # Finding 14 — one source of truth for the streaming path.
 # ---------------------------------------------------------------------------
