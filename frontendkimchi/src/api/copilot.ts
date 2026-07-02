@@ -1,9 +1,34 @@
-import { apiClient, API_BASE_URL, newTraceId, ApiError, NetworkError, TIMEOUT_LONG_MS, refreshAccessToken } from "./client";
+import { apiClient, API_BASE_URL, newTraceId, ApiError, NetworkError, TIMEOUT_LONG_MS, TIMEOUT_SHORT_MS, refreshAccessToken } from "./client";
 import { getAccessToken } from "./tokenStore";
-import type { HealthResponse, UnifiedQueryRequest, UnifiedQueryResponse } from "./types";
+import type {
+  HealthResponse,
+  QueryFeedbackRecord,
+  QueryFeedbackRequest,
+  UnifiedQueryRequest,
+  UnifiedQueryResponse,
+} from "./types";
 
 export function checkHealth(): Promise<HealthResponse> {
   return apiClient.get<HealthResponse>("/health", { timeoutMs: 15_000 });
+}
+
+/**
+ * Submit operator feedback for a completed query, keyed by its trace id.
+ *
+ * The query trace is persisted off the request path, so immediately after an
+ * answer the trace may not be written yet and the backend returns 404. Callers
+ * should surface that as a "try again in a moment" message rather than a hard
+ * error.
+ */
+export function submitFeedback(
+  traceId: string,
+  feedback: QueryFeedbackRequest,
+): Promise<QueryFeedbackRecord> {
+  return apiClient.postJson<QueryFeedbackRecord>(
+    `/queries/${encodeURIComponent(traceId)}/feedback`,
+    feedback,
+    { timeoutMs: TIMEOUT_SHORT_MS },
+  );
 }
 
 export interface AskParams {

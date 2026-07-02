@@ -99,3 +99,16 @@ export interface LogRecord {
 export interface HealthResponse {
   status: string;
 }
+
+export interface QueryFeedbackRequest {
+  /** 1 (least helpful) – 5 (most helpful). The UI maps 👎→1 and 👍→5. */
+  rating: number;
+  comment: string | null;
+  expected_answer: string | null;
+}
+
+export interface QueryFeedbackRecord extends QueryFeedbackRequest {
+  trace_id: string;
+  feedback_id: string;
+  created_at: string;
+}
