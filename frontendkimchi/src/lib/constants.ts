@@ -23,6 +23,7 @@ export const LOCALSTORAGE_KEYS = {
   documents: "rag-console:documents:v1",
   selectedDocuments: "rag-console:selected-documents:v1",
   copilotHistory: "rag-console:copilot-history:v1",
+  copilotConversation: "rag-console:copilot-conversation:v1",
   observability: "rag-console:observability-preferences:v1",
   authAccessToken: "rag-console:auth:access:v1",
   authRefreshToken: "rag-console:auth:refresh:v1",

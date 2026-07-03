@@ -16,6 +16,12 @@ from rag_system.observability_tracing.context import (
     propagate_into_thread,
     restore_span,
 )
+from rag_system.observability_tracing.config_redaction import (
+    REDACTED_PLACEHOLDER,
+    SENSITIVE_KEY_PATTERNS,
+    build_trace_config_payload,
+    redact_settings,
+)
 from rag_system.observability_tracing.flush_workers import (
     DEFAULT_FLUSH_INTERVAL_SECONDS,
     MAX_DRAIN_LATENCY_SECONDS,
@@ -58,6 +64,8 @@ __all__ = [
     "LogRecordModel",
     "LogSerializer",
     "MAX_DRAIN_LATENCY_SECONDS",
+    "REDACTED_PLACEHOLDER",
+    "SENSITIVE_KEY_PATTERNS",
     "Span",
     "SpanRecorder",
     "SpanStatus",
@@ -71,12 +79,14 @@ __all__ = [
     "TraceSerializer",
     "TracePersistingLogHandler",
     "bind_span",
+    "build_trace_config_payload",
     "get_active_span_id",
     "get_active_trace_id",
     "get_span_recorder",
     "group_spans_by_trace",
     "propagate_into_thread",
     "record_query_summary",
+    "redact_settings",
     "restore_span",
 ]
 

@@ -34,7 +34,9 @@ class FakeSettings:
     retrieval_dense_top_k = 10
     low_top_score_threshold = None
     bedrock_embedding_model_id = "fake-embedder"
+    embedding_model_id = "fake-embedder"
     s3_bucket = "bucket"
+    gcs_bucket = "bucket"
     pinecone_index_name = "fake-index"
 
 
@@ -85,7 +87,7 @@ class IntegrationQueue:
         return [
             ReceivedIngestionJob(
                 job=job,
-                receipt_handle=f"receipt-{index}",
+                ack_id=f"receipt-{index}",
                 message_id=f"message-{index}",
             )
             for index, job in enumerate(self.jobs, start=1)
@@ -93,7 +95,7 @@ class IntegrationQueue:
         ]
 
     def delete(self, received: ReceivedIngestionJob) -> None:
-        self.deleted.append(received.receipt_handle)
+        self.deleted.append(received.ack_id)
 
 
 class IntegrationParser:

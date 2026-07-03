@@ -67,6 +67,29 @@ def test_create_user_persists_and_reads_back():
     assert fetched is not None and fetched.id == created.id
 
 
+def test_new_users_are_non_operators_by_default():
+    store, _ = _user_store()
+    created = store.create_user("plain@example.com", "h")
+    assert created.is_operator is False
+    fetched = store.get_by_id(created.id)
+    assert fetched is not None and fetched.is_operator is False
+
+
+def test_stored_operator_flag_is_read_back():
+    """The store selects and coerces the is_operator column, so a stored
+    operator round-trips (regression: the column was previously not selected)."""
+    store, db = _user_store()
+    created = store.create_user("op@example.com", "h")
+    # Simulate an elevated stored row (id, email, hash, is_active, is_operator, created_at).
+    row = db.users[created.id]
+    db.users[created.id] = (row[0], row[1], row[2], row[3], True, row[5])
+
+    fetched = store.get_by_id(created.id)
+    assert fetched is not None and fetched.is_operator is True
+    by_email = store.get_by_email("op@example.com")
+    assert by_email is not None and by_email.is_operator is True
+
+
 def test_get_by_email_is_case_insensitive():
     store, _ = _user_store()
     store.create_user("Mixed@Case.com", "h")

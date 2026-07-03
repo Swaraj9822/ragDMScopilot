@@ -449,6 +449,37 @@ class SpanRecorder:
         """
         self.set_attributes(span, document_id=document_id)
 
+    def set_trace_config(
+        self,
+        span: Span,
+        *,
+        ai_configuration_version_id: str | None,
+        resolved_settings: dict[str, Any] | None = None,
+    ) -> None:
+        """Record the producing AI configuration version on the trace (R9.1, R9.2, R9.11).
+
+        Stamps the ``ai_configuration_version_id`` and the redacted resolved
+        settings onto the span so the flush worker can propagate them to the
+        assembled :class:`Trace`. The *resolved_settings* must already be
+        redacted (the caller is responsible for calling
+        :func:`~.config_redaction.build_trace_config_payload` which performs
+        the deep-copy and redaction).
+
+        When the version cannot be resolved the caller passes the
+        ``UNRESOLVED_VERSION_ID`` sentinel and an empty settings dict, ensuring
+        the trace still retains all other data (R9.2).
+        """
+        self.set_attributes(
+            span,
+            ai_configuration_version_id=ai_configuration_version_id or "unresolved",
+        )
+        # Store as a span-level attribute for the flush worker to extract.
+        span.attributes["_resolved_settings"] = str(resolved_settings or {})
+        # Also attach directly to the Trace via the span's trace_id reference,
+        # so the flush worker's group_spans_by_trace can propagate it.
+        span._trace_config_version_id = ai_configuration_version_id  # type: ignore[attr-defined]
+        span._trace_resolved_settings = resolved_settings or {}  # type: ignore[attr-defined]
+
     def set_ingestion_attributes(
         self,
         span: Span,

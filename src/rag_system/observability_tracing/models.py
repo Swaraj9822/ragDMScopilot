@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 # ---------------------------------------------------------------------------
 # Scalar aliases
@@ -59,6 +59,13 @@ class Trace:
     duration_ms: int                      # non-negative integer
     root_status: SpanStatus
     spans: list[Span] = field(default_factory=list)  # 1..10000
+    # Identifier of the AI_Configuration_Version that produced this trace
+    # (R9.1). None indicates the configuration was unresolved when the trace was
+    # recorded (R9.2); all other trace data is retained regardless.
+    ai_configuration_version_id: str | None = None
+    # Redacted resolved settings recorded alongside the version id (R9.1, R9.11).
+    # Empty dict when the configuration could not be resolved (R9.2).
+    resolved_settings: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -101,3 +108,8 @@ class StoredTrace(TypedDict):
     duration_ms: int
     root_status: str
     spans: list[StoredSpan]
+    # Additive/optional: None => unresolved (R9.1, R9.2). NotRequired so existing
+    # serializer output (which omits it) remains valid.
+    ai_configuration_version_id: NotRequired[str | None]
+    # Redacted resolved settings (R9.1, R9.11). NotRequired for backward compat.
+    resolved_settings: NotRequired[dict[str, object]]

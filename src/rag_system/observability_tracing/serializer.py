@@ -142,6 +142,10 @@ class TraceSerializer:
                 "root_status": trace.root_status,
                 "spans": [self._serialize_span(span) for span in trace.spans],
             }
+            # Include AI configuration version and redacted settings (R9.1, R9.11).
+            if trace.ai_configuration_version_id is not None:
+                stored["ai_configuration_version_id"] = trace.ai_configuration_version_id
+                stored["resolved_settings"] = trace.resolved_settings
             return stored
         except TraceSerializationError:
             raise
@@ -222,6 +226,10 @@ class TraceSerializer:
 
             spans = [self._deserialize_span(raw, trace_id) for raw in raw_spans]
 
+            # AI configuration version (R9.1, R9.2) — optional for backward compat.
+            ai_config_version_id = stored.get("ai_configuration_version_id")
+            resolved_settings = stored.get("resolved_settings", {})
+
             return Trace(
                 trace_id=trace_id,
                 route=route,
@@ -229,6 +237,8 @@ class TraceSerializer:
                 duration_ms=duration_ms,
                 root_status=root_status,
                 spans=spans,
+                ai_configuration_version_id=ai_config_version_id if isinstance(ai_config_version_id, str) else None,
+                resolved_settings=resolved_settings if isinstance(resolved_settings, dict) else {},
             )
         except TraceDeserializationError:
             raise

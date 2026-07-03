@@ -22,6 +22,10 @@ function baseResponse(overrides: Partial<UnifiedQueryResponse> = {}): UnifiedQue
     rows: [],
     data_sources: [],
     routing_reasoning: null,
+    conversation_id: null,
+    rewritten_question: null,
+    claims: [],
+    claim_decomposition_failed: false,
     ...overrides,
   };
 }

@@ -12,7 +12,11 @@ Public surface:
 
 from __future__ import annotations
 
-from rag_system.auth.dependencies import get_auth_service, get_current_user
+from rag_system.auth.dependencies import (
+    get_auth_service,
+    get_current_user,
+    require_operator,
+)
 from rag_system.auth.models import (
     LoginRequest,
     RegisterRequest,
@@ -32,5 +36,6 @@ __all__ = [
     "apply_schema",
     "get_auth_service",
     "get_current_user",
+    "require_operator",
     "router",
 ]

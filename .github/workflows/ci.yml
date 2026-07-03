@@ -4,7 +4,7 @@ name: CI
 # the runner and needs no real credentials: the app constructs Settings at
 # import time, so the few required fields are supplied as harmless, clearly
 # non-secret placeholders. Tests that need live services (Postgres, Pinecone,
-# Bedrock) skip themselves when those are absent.
+# Vertex AI) skip themselves when those are absent.
 on:
   push:
     branches: ["**"]
@@ -29,8 +29,7 @@ jobs:
     # Non-secret placeholders. Settings() requires these fields to construct;
     # no real infrastructure is contacted during the test run.
     env:
-      RAG_S3_BUCKET: ci-bucket
-      RAG_INGESTION_QUEUE_URL: https://sqs.ci.invalid/queue
+      RAG_GCS_BUCKET: ci-bucket
       LLAMA_CLOUD_API_KEY: llx-ci-placeholder
       PINECONE_API_KEY: pc-ci-placeholder
       PINECONE_INDEX_NAME: ci-index

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { FileStack } from "lucide-react";
+import { AlertTriangle, ChevronDown, FileStack, Library, Loader2 } from "lucide-react";
 import type { BrowserDocumentEntry } from "../api/types";
 import { replaceDocument, deleteDocument } from "../api/documents";
 import { ApiError } from "../api/client";
@@ -9,9 +9,11 @@ import { ConfirmDialog } from "../components/common/ConfirmDialog";
 import { UploadDropZone } from "../components/documents/UploadDropZone";
 import { UploadQueue } from "../components/documents/UploadQueue";
 import { DocumentCard } from "../components/documents/DocumentCard";
+import { CorpusDocumentCard } from "../components/documents/CorpusDocumentCard";
 import { TrackDocument } from "../components/documents/TrackDocument";
 import { useUploadManager } from "../hooks/useUploadManager";
 import { useDocumentStore } from "../hooks/useDocumentStore";
+import { useCorpusListing } from "../hooks/useCorpusListing";
 import { useToast } from "../hooks/useToast";
 import styles from "./DocumentsPage.module.css";
 
@@ -19,6 +21,7 @@ export default function DocumentsPage() {
   const { tasks, enqueue, removeTask, clearFinished } = useUploadManager();
   const { entries, upsert, remove } = useDocumentStore();
   const { pushToast } = useToast();
+  const corpus = useCorpusListing();
 
   const [pendingDelete, setPendingDelete] = useState<BrowserDocumentEntry | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -81,7 +84,68 @@ export default function DocumentsPage() {
         </div>
 
         <div className={styles.right}>
-          <h2 className={styles.sectionTitle}>This browser's uploads</h2>
+          {/* ── Server corpus listing (R4) ── */}
+          <h2 className={styles.sectionTitle}>Corpus</h2>
+          <p className="meta" style={{ marginBottom: "var(--space-3)" }}>
+            All documents in the backend corpus, fetched from the server.
+          </p>
+
+          {corpus.loading && corpus.documents.length === 0 ? (
+            <div className={styles.corpusLoading} aria-busy="true" aria-label="Loading corpus">
+              <Loader2 size={20} className={styles.spinner} aria-hidden="true" />
+              <span className="meta">Loading corpus…</span>
+            </div>
+          ) : corpus.documents.length === 0 && !corpus.error ? (
+            <EmptyState
+              icon={Library}
+              title="No documents in the corpus."
+              body="No documents match the current view. Upload a file to get started."
+            />
+          ) : (
+            <>
+              <div className={styles.cards}>
+                {corpus.documents.map((doc) => (
+                  <CorpusDocumentCard key={doc.id} document={doc} />
+                ))}
+              </div>
+
+              {corpus.hasMore && (
+                <button
+                  type="button"
+                  className={`btn ${styles.loadMoreBtn}`}
+                  onClick={corpus.loadMore}
+                  disabled={corpus.loadingMore}
+                  aria-label="Load more documents"
+                >
+                  {corpus.loadingMore ? (
+                    <Loader2 size={14} className={styles.spinner} aria-hidden="true" />
+                  ) : (
+                    <ChevronDown size={14} aria-hidden="true" />
+                  )}
+                  {corpus.loadingMore ? "Loading…" : "Load more"}
+                </button>
+              )}
+            </>
+          )}
+
+          {corpus.error && (
+            <div className={styles.corpusError} role="alert">
+              <AlertTriangle size={16} aria-hidden="true" />
+              <span>Could not retrieve the corpus. {corpus.error}</span>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => corpus.refresh()}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {/* ── Browser-local uploads ── */}
+          <h2 className={styles.sectionTitle} style={{ marginTop: "var(--space-6)" }}>
+            This browser&apos;s uploads
+          </h2>
           <p className="meta" style={{ marginBottom: "var(--space-3)" }}>
             Records uploaded or tracked in this browser. This is not the full corpus.
           </p>

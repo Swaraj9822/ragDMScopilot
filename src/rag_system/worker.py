@@ -11,7 +11,7 @@ from rag_system.observability import (
     setup_logging,
 )
 from rag_system.observability_tracing import get_span_recorder
-from rag_system.queue import ReceivedIngestionJob, SqsIngestionQueue
+from rag_system.queue import PubSubIngestionQueue, ReceivedIngestionJob
 from rag_system.service import DocumentDeletedError, RagService, StaleIngestionError
 
 logger = get_logger(__name__)
@@ -29,7 +29,7 @@ class IngestionWorker:
     def __init__(
         self,
         service: RagService,
-        queue: SqsIngestionQueue,
+        queue: PubSubIngestionQueue,
         max_concurrency: int | None = None,
     ) -> None:
         self._service = service

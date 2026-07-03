@@ -187,8 +187,8 @@ def _service(
     service = object.__new__(RagService)
     service._settings = SimpleNamespace(
         sparse_enabled=False,
-        bedrock_embedding_model_id="embed-model",
-        s3_bucket="bucket",
+        embedding_model_id="embed-model",
+        gcs_bucket="bucket",
         pinecone_index_name="index",
     )
     service._store = store

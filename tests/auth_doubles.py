@@ -39,8 +39,7 @@ __all__ = [
 
 # Required Settings fields have no defaults, so supply harmless placeholders.
 _REQUIRED = {
-    "RAG_S3_BUCKET": "test-bucket",
-    "RAG_INGESTION_QUEUE_URL": "https://sqs.test.invalid/queue",
+    "RAG_GCS_BUCKET": "test-bucket",
     "LLAMA_CLOUD_API_KEY": "llx-test",
     "PINECONE_API_KEY": "pc-test",
     "PINECONE_INDEX_NAME": "test-index",
@@ -245,8 +244,8 @@ class _FakeCursor:
     def _insert_user(self, params: tuple) -> None:
         if self._db.force_unique_violation:
             raise FakeUniqueViolation("duplicate key value violates users_email_lower_key")
-        user_id, email, password_hash, is_active, created_at = params
-        row = (user_id, email, password_hash, is_active, created_at)
+        user_id, email, password_hash, is_active, is_operator, created_at = params
+        row = (user_id, email, password_hash, is_active, is_operator, created_at)
         self._db.users[user_id] = row
         self._result = row
 
@@ -256,8 +255,8 @@ class _FakeCursor:
         if self._db.users:
             self._result = None
             return
-        user_id, email, password_hash, is_active, created_at = params
-        row = (user_id, email, password_hash, is_active, created_at)
+        user_id, email, password_hash, is_active, is_operator, created_at = params
+        row = (user_id, email, password_hash, is_active, is_operator, created_at)
         self._db.users[user_id] = row
         self._result = row
 

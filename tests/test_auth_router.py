@@ -186,3 +186,31 @@ def test_me_returns_current_user_with_valid_token():
     resp = client.get("/auth/me", headers={"Authorization": f"Bearer {access}"})
     assert resp.status_code == 200
     assert resp.json()["email"] == "user@example.com"
+
+
+def test_me_reflects_allow_listed_operator_status():
+    """An allow-listed operator (stored flag unset) is reported is_operator=True.
+
+    Regression: /auth/me previously returned the stored flag verbatim, so an
+    allow-listed operator was authorized by operator endpoints while the UI hid
+    the operator tabs. /auth/me now resolves operator status the same way
+    require_operator does.
+    """
+    client = _build_client(
+        RAG_AUTH_ALLOW_REGISTRATION=True,
+        RAG_OPERATOR_EMAILS="user@example.com",
+    )
+    _register(client)
+    access = _login(client).json()["access_token"]
+    resp = client.get("/auth/me", headers={"Authorization": f"Bearer {access}"})
+    assert resp.status_code == 200
+    assert resp.json()["is_operator"] is True
+
+
+def test_me_non_operator_reports_false_without_allow_list():
+    client = _build_client(RAG_AUTH_ALLOW_REGISTRATION=True)
+    _register(client)
+    access = _login(client).json()["access_token"]
+    resp = client.get("/auth/me", headers={"Authorization": f"Bearer {access}"})
+    assert resp.status_code == 200
+    assert resp.json()["is_operator"] is False

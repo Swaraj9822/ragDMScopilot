@@ -15,6 +15,7 @@ export const defaultHandlers = [
       email: "test@example.com",
       is_active: true,
       created_at: "2024-01-01T00:00:00Z",
+      is_operator: false,
     }),
   ),
   // Login/refresh return only the access token in the body; the refresh token

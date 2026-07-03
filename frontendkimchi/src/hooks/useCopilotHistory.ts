@@ -6,6 +6,8 @@ import type { UnifiedQueryResponse } from "../api/types";
 export interface CopilotExchange {
   id: string;
   question: string;
+  /** The standalone query a follow-up was rewritten into, when it differed. */
+  rewrittenQuestion?: string | null;
   response: UnifiedQueryResponse;
   elapsedMs: number;
   askedAt: string;

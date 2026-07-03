@@ -98,6 +98,11 @@ class UserPublic(BaseModel):
     email: str
     is_active: bool
     created_at: datetime
+    # Whether the user has operator privileges (feedback review, corpus admin,
+    # evaluation, replay, AI-config, diagnosis, knowledge-gap). Defaults to
+    # False so every existing/new user is a non-operator unless elevated. The
+    # frontend uses this to show/hide operator-only navigation.
+    is_operator: bool = False
 
 
 @dataclass(frozen=True)
@@ -109,6 +114,10 @@ class UserRecord:
     password_hash: str
     is_active: bool
     created_at: datetime
+    # Stored operator flag. Defaults to False so a user is a non-operator unless
+    # explicitly elevated; operator status may also be granted at request time
+    # via the ``operator_emails`` allow-list (see ``require_operator``).
+    is_operator: bool = False
 
     def to_public(self) -> UserPublic:
         return UserPublic(
@@ -116,4 +125,5 @@ class UserRecord:
             email=self.email,
             is_active=self.is_active,
             created_at=self.created_at,
+            is_operator=self.is_operator,
         )

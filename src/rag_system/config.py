@@ -5,29 +5,56 @@ from typing import Literal
 import boto3
 import boto3.session
 from botocore.config import Config as BotoConfig
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolve .env relative to this file so it works from any working directory
 _ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
 
 
+class ModelPricing(BaseModel):
+    """USD price per 1,000 tokens for a single model id.
+
+    Used to convert per-query prompt/completion token counts into a monetary
+    ``cost`` for replay comparison and cost reporting (R11.1, R11.6). Prices are
+    non-negative; a zero price is allowed (e.g. a free/self-hosted model).
+    """
+
+    prompt_usd_per_1k: float = Field(ge=0.0)
+    completion_usd_per_1k: float = Field(ge=0.0)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=_ENV_FILE, env_prefix="", extra="ignore")
 
+    # --- AWS (retained only for the optional, currently-disabled Bedrock
+    # reranker). The rest of the data/AI plane now runs on GCP. ---
     aws_access_key_id: str | None = Field(default=None, alias="AWS_ACCESS_KEY_ID")
     aws_secret_access_key: str | None = Field(default=None, alias="AWS_SECRET_ACCESS_KEY")
     aws_region: str = Field(default="us-east-1", alias="AWS_REGION")
-    s3_bucket: str = Field(alias="RAG_S3_BUCKET")
-    s3_kms_key_id: str | None = Field(default=None, alias="RAG_S3_KMS_KEY_ID")
-    ingestion_queue_url: str = Field(alias="RAG_INGESTION_QUEUE_URL")
+
+    # --- Google Cloud Storage artifact store (was AWS S3) ---
+    gcs_bucket: str = Field(alias="RAG_GCS_BUCKET")
+    # Optional Cloud KMS key for CMEK (customer-managed) object encryption, as a
+    # full resource name:
+    # projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>. GCS encrypts at
+    # rest by default, so this is only needed when CMEK is required.
+    gcs_kms_key_name: str | None = Field(default=None, alias="RAG_GCS_KMS_KEY_NAME")
+
+    # --- Cloud Pub/Sub ingestion queue (was AWS SQS) ---
+    # Optional so tests/local setups that never touch the queue can construct
+    # Settings without them; the queue client validates their presence at use.
+    pubsub_topic_id: str | None = Field(default=None, alias="RAG_PUBSUB_TOPIC_ID")
+    pubsub_subscription_id: str | None = Field(
+        default=None, alias="RAG_PUBSUB_SUBSCRIPTION_ID"
+    )
     ingestion_poll_seconds: int = Field(default=20, alias="RAG_INGESTION_POLL_SECONDS")
     ingestion_max_messages: int = Field(default=10, alias="RAG_INGESTION_MAX_MESSAGES")
     # How many received ingestion messages to process concurrently within a
     # single poll cycle. Bounded so a burst upload drains in parallel instead of
-    # one-at-a-time, without swamping Bedrock/Pinecone. Ensure the SQS queue's
-    # visibility timeout comfortably exceeds worst-case ingestion time so an
-    # in-flight message is not redelivered while still being processed.
+    # one-at-a-time, without swamping the embedder/Pinecone. Ensure the Pub/Sub
+    # subscription's ack deadline comfortably exceeds worst-case ingestion time
+    # so an in-flight message is not redelivered while still being processed.
     ingestion_max_concurrency: int = Field(
         default=4, alias="RAG_INGESTION_MAX_CONCURRENCY"
     )
@@ -36,15 +63,26 @@ class Settings(BaseSettings):
 
     pinecone_api_key: str = Field(alias="PINECONE_API_KEY")
     pinecone_index_name: str = Field(alias="PINECONE_INDEX_NAME")
+    # Serverless placement + metric used when (re)creating the index via
+    # scripts/create_pinecone_index.py. "dotproduct" is required for Pinecone
+    # sparse+dense hybrid search. The cloud/region below are Pinecone-hosted
+    # infrastructure and are unrelated to the user's own AWS account.
+    pinecone_cloud: str = Field(default="aws", alias="RAG_PINECONE_CLOUD")
+    pinecone_region: str = Field(default="us-east-1", alias="RAG_PINECONE_REGION")
+    pinecone_metric: str = Field(default="dotproduct", alias="RAG_PINECONE_METRIC")
 
-    bedrock_embedding_model_id: str = Field(
-        default="amazon.titan-embed-text-v2:0", alias="BEDROCK_EMBEDDING_MODEL_ID"
+    # --- Embeddings (Google Gemini on Vertex AI; was AWS Bedrock Titan) ---
+    embedding_model_id: str = Field(
+        default="gemini-embedding-001", alias="EMBEDDING_MODEL_ID"
     )
-    embedding_dimension: int = Field(default=1024, alias="EMBEDDING_DIMENSION")
-    # Titan v2 has no batch embedding API, so chunks are embedded one request
-    # each. Issuing those requests concurrently (bounded) turns a serial
-    # per-chunk round-trip into a parallel fan-out — the dominant ingestion
-    # latency win for multi-hundred-chunk documents.
+    # gemini-embedding-001 emits 3072-dim vectors by default (Matryoshka:
+    # 768/1536/3072 are the recommended sizes). The Pinecone index dimension
+    # must match this value.
+    embedding_dimension: int = Field(default=3072, alias="EMBEDDING_DIMENSION")
+    # The Vertex embedding API embeds one text per request, so chunks are
+    # embedded one request each. Issuing those requests concurrently (bounded)
+    # turns a serial per-chunk round-trip into a parallel fan-out — the dominant
+    # ingestion latency win for multi-hundred-chunk documents.
     embedding_max_workers: int = Field(default=8, alias="RAG_EMBEDDING_MAX_WORKERS")
     bedrock_rerank_model_id: str = Field(
         default="cohere.rerank-v3-5:0", alias="BEDROCK_RERANK_MODEL_ID"
@@ -124,6 +162,33 @@ class Settings(BaseSettings):
         default=0.12, alias="RAG_HYBRID_OVERLAP_THRESHOLD"
     )
 
+    # --- Multi-turn conversations ---
+    # When enabled, follow-up questions are rewritten into standalone queries
+    # using the stored conversation history before routing/retrieval, and each
+    # turn is persisted server-side so the next turn can reference it.
+    conversation_rewrite_enabled: bool = Field(
+        default=True, alias="RAG_CONVERSATION_REWRITE_ENABLED"
+    )
+    # Newest turns kept per conversation. Bounds both the rewrite prompt size
+    # and the stored record; older turns are dropped once the cap is exceeded.
+    conversation_max_turns: int = Field(
+        default=12, alias="RAG_CONVERSATION_MAX_TURNS"
+    )
+    # How many of the most recent turns are fed to the follow-up rewriter. Kept
+    # small so the rewrite call stays cheap and focused on recent context.
+    conversation_rewrite_window: int = Field(
+        default=6, alias="RAG_CONVERSATION_REWRITE_WINDOW"
+    )
+
+    @field_validator("conversation_max_turns", "conversation_rewrite_window")
+    @classmethod
+    def _validate_conversation_bounds(cls, value: int) -> int:
+        if value < 1 or value > 100:
+            raise ValueError(
+                f"invalid conversation window {value!r}: must be within 1 and 100 inclusive"
+            )
+        return value
+
     @field_validator("hybrid_overlap_threshold")
     @classmethod
     def _validate_overlap_threshold(cls, value: float) -> float:
@@ -154,9 +219,9 @@ class Settings(BaseSettings):
             )
         return value
 
-    # AWS client tuning. Bedrock/S3 latency from some environments is erratic;
-    # explicit timeouts + adaptive retries fail fast and back off on throttling
-    # instead of hanging on a single slow call.
+    # AWS client tuning. Retained for the optional (currently disabled) Bedrock
+    # reranker: explicit timeouts + adaptive retries fail fast and back off on
+    # throttling instead of hanging on a single slow call.
     aws_connect_timeout_s: int = Field(default=5, alias="AWS_CONNECT_TIMEOUT_S")
     aws_read_timeout_s: int = Field(default=30, alias="AWS_READ_TIMEOUT_S")
     aws_max_attempts: int = Field(default=4, alias="AWS_MAX_ATTEMPTS")
@@ -215,6 +280,176 @@ class Settings(BaseSettings):
             )
         return value
 
+    # --- Answer path / abstention (R2, R3) ---
+    # Per-route minimum routing confidence: below this the router treats a
+    # classification as too uncertain to answer directly. Retrieval score
+    # threshold gates whether retrieved hits are strong enough to ground an
+    # answer. Both are confidences in the inclusive range [0.0, 1.0].
+    route_min_confidence: float = Field(default=0.5, alias="RAG_ROUTE_MIN_CONFIDENCE")
+    retrieval_score_threshold: float = Field(
+        default=0.3, alias="RAG_RETRIEVAL_SCORE_THRESHOLD"
+    )
+    # How long an issued clarification remains valid; a reply after this window
+    # is rejected as expired (R2.6).
+    clarification_expiry_minutes: int = Field(
+        default=30, alias="RAG_CLARIFICATION_EXPIRY_MINUTES"
+    )
+    # Ceiling on concurrent (claim, evidence) entailment calls during claim
+    # verification (R1.3). The per-pair calls are otherwise a serial
+    # O(claims x hits) chain on the answer path; a bounded pool parallelizes
+    # them without changing the per-pair verdicts or the evidence-item count.
+    claim_verification_max_workers: int = Field(
+        default=8, alias="RAG_CLAIM_VERIFICATION_MAX_WORKERS"
+    )
+
+    # --- Corpus inventory / listing (R4) ---
+    # Maximum documents returned per corpus page. Requests above this are
+    # clamped down to it; the value itself must fall within [1, 100] (R4.4).
+    corpus_page_size: int = Field(default=50, alias="RAG_CORPUS_PAGE_SIZE")
+    # HMAC secret used to sign opaque pagination cursors so a tampered or forged
+    # cursor is rejected rather than silently trusted (R4.6). Optional in
+    # development; set a strong secret in production.
+    pagination_signing_key: str | None = Field(
+        default=None, alias="RAG_PAGINATION_SIGNING_KEY"
+    )
+
+    # --- Feedback review inbox (R6) ---
+    # Evaluation_Set that reviewed Feedback_Items are promoted into (R6.6). A
+    # single default set is sufficient today; multi-set promotion can extend the
+    # endpoint contract later without changing the promotion logic.
+    default_evaluation_set_id: str = Field(
+        default="default", alias="RAG_DEFAULT_EVALUATION_SET_ID"
+    )
+
+    # --- Evaluation / LLM judge (R7) ---
+    # Depth k at which retrieval metrics (recall@k, precision@k, MRR@k) are
+    # computed against relevance labels.
+    retrieval_metric_depth_k: int = Field(
+        default=10, alias="RAG_RETRIEVAL_METRIC_DEPTH_K"
+    )
+    # The LLM judge uses a thinking model distinct from the generation model.
+    llm_judge_model_id: str = Field(
+        default="gemini-3.1-pro", alias="RAG_LLM_JUDGE_MODEL_ID"
+    )
+    # Bounded thinking-token budget for the judge model.
+    llm_judge_thinking_budget: int = Field(
+        default=4096, alias="RAG_LLM_JUDGE_THINKING_BUDGET"
+    )
+    # Read timeout for a single judge call (~55s) sized to fit inside the fixed
+    # per-case timeout (60s) so a slow call is recorded as a per-case error
+    # rather than hanging the run (R7.8).
+    llm_judge_read_timeout_s: int = Field(
+        default=55, alias="RAG_LLM_JUDGE_READ_TIMEOUT_S"
+    )
+    llm_judge_per_case_timeout_s: int = Field(
+        default=60, alias="RAG_LLM_JUDGE_PER_CASE_TIMEOUT_S"
+    )
+    # How often the (out-of-CI) LLM judge evaluation is scheduled to run.
+    llm_judge_schedule_interval_hours: int = Field(
+        default=24, alias="RAG_LLM_JUDGE_SCHEDULE_INTERVAL_HOURS"
+    )
+
+    # --- Trace investigator (R10) ---
+    trace_investigator_model_id: str = Field(
+        default="gemini-3.1-pro", alias="RAG_TRACE_INVESTIGATOR_MODEL_ID"
+    )
+    trace_investigator_thinking_budget: int = Field(
+        default=4096, alias="RAG_TRACE_INVESTIGATOR_THINKING_BUDGET"
+    )
+    trace_investigator_read_timeout_s: int = Field(
+        default=55, alias="RAG_TRACE_INVESTIGATOR_READ_TIMEOUT_S"
+    )
+
+    # --- Knowledge-gap analysis (R11) ---
+    # Maximum topics surfaced in a generated knowledge-gap map, and the minimum
+    # number of eligible outcomes required before a topic is reported (R11.6).
+    knowledge_gap_max_topics: int = Field(
+        default=25, alias="RAG_KNOWLEDGE_GAP_MAX_TOPICS"
+    )
+    knowledge_gap_min_eligible_outcomes: int = Field(
+        default=20, alias="RAG_KNOWLEDGE_GAP_MIN_ELIGIBLE_OUTCOMES"
+    )
+
+    # --- Replay and compare lab (R8, R11) ---
+    # Wall-clock budget for a single replay job before it is timed out.
+    replay_job_timeout_s: int = Field(default=300, alias="RAG_REPLAY_JOB_TIMEOUT_S")
+    # Per-model USD pricing per 1,000 tokens, keyed by model id. Used to attach a
+    # monetary cost to replay/comparison runs. Defaults cover the generation
+    # model (gemini-3.5-flash) and the judge/investigator model (gemini-3.1-pro).
+    model_pricing: dict[str, ModelPricing] = Field(
+        default_factory=lambda: {
+            "gemini-3.5-flash": ModelPricing(
+                prompt_usd_per_1k=0.000075, completion_usd_per_1k=0.0003
+            ),
+            "gemini-3.1-pro": ModelPricing(
+                prompt_usd_per_1k=0.00125, completion_usd_per_1k=0.005
+            ),
+        },
+        alias="RAG_MODEL_PRICING",
+    )
+
+    @field_validator("route_min_confidence", "retrieval_score_threshold")
+    @classmethod
+    def _validate_confidence_unit_interval(cls, value: float) -> float:
+        """Confidence/score thresholds must lie in the inclusive [0.0, 1.0]."""
+        if value < 0.0 or value > 1.0:
+            raise ValueError(
+                f"invalid confidence threshold {value!r}: must be within the "
+                "inclusive range [0.0, 1.0]"
+            )
+        return value
+
+    @field_validator("corpus_page_size")
+    @classmethod
+    def _validate_corpus_page_size(cls, value: int) -> int:
+        """Page size must be a positive integer no larger than 100 (R4.4)."""
+        if value < 1 or value > 100:
+            raise ValueError(
+                f"invalid corpus page size {value!r}: must be within 1 and 100 inclusive"
+            )
+        return value
+
+    @field_validator(
+        "llm_judge_thinking_budget",
+        "trace_investigator_thinking_budget",
+    )
+    @classmethod
+    def _validate_thinking_budget(cls, value: int) -> int:
+        """Thinking-token budgets are bounded to a sane [0, 32768] range.
+
+        Zero disables thinking; the upper bound guards against a runaway budget
+        that would blow the per-case timeout and cost.
+        """
+        if value < 0 or value > 32768:
+            raise ValueError(
+                f"invalid thinking budget {value!r}: must be within 0 and 32768 inclusive"
+            )
+        return value
+
+    @field_validator(
+        "clarification_expiry_minutes",
+        "retrieval_metric_depth_k",
+        "llm_judge_read_timeout_s",
+        "llm_judge_per_case_timeout_s",
+        "llm_judge_schedule_interval_hours",
+        "trace_investigator_read_timeout_s",
+        "knowledge_gap_max_topics",
+        "knowledge_gap_min_eligible_outcomes",
+        "replay_job_timeout_s",
+    )
+    @classmethod
+    def _validate_positive_bounded_minutes_counts(cls, value: int) -> int:
+        """Positive time windows / counts must fall within [1, 100000].
+
+        A zero/negative value would disable or invert the knob it controls, and
+        an absurdly large one defeats the bound it exists to enforce.
+        """
+        if value < 1 or value > 100_000:
+            raise ValueError(
+                f"invalid value {value!r}: must be within 1 and 100000 inclusive"
+            )
+        return value
+
     # --- Authentication (self-managed JWT) ---
     # When auth is enabled every endpoint except the public ones (/, /health,
     # /metrics, /docs, and /auth/*) requires a valid bearer token. Disable it
@@ -235,6 +470,20 @@ class Settings(BaseSettings):
     auth_allow_registration: bool = Field(
         default=False, alias="RAG_AUTH_ALLOW_REGISTRATION"
     )
+    # Comma-separated allow-list of operator email addresses. A user whose email
+    # is in this list is treated as an operator at request time even without the
+    # stored ``is_operator`` flag, bootstrapping the first operators without a
+    # migration or admin UI. Empty by default (no allow-listed operators).
+    operator_emails: str = Field(default="", alias="RAG_OPERATOR_EMAILS")
+
+    @property
+    def operator_emails_set(self) -> frozenset[str]:
+        """Normalized (stripped, lowercased) set of allow-listed operator emails."""
+        return frozenset(
+            email.strip().lower()
+            for email in self.operator_emails.split(",")
+            if email.strip()
+        )
     # Per-client rate limiting for abuse-prone auth endpoints (login, register,
     # refresh). In-process/per-replica only; front with a shared limiter for
     # multi-instance deployments. Set the per-minute allowance to 0 to disable.
@@ -363,11 +612,29 @@ class Settings(BaseSettings):
             retries={"max_attempts": self.aws_max_attempts, "mode": "adaptive"},
         )
 
-    def bedrock_runtime_client(self):
-        """bedrock-runtime client with tuned timeouts/retries."""
-        return self.boto3_session().client(
-            "bedrock-runtime", config=self.boto3_client_config()
-        )
+    def gcs_client(self):
+        """Return a Google Cloud Storage client using Application Default
+        Credentials (the VM/service-account identity that already backs Vertex
+        AI). ``google_application_credentials`` overrides ADC when set."""
+        from google.cloud import storage
+
+        if self.google_application_credentials:
+            return storage.Client.from_service_account_json(
+                self.google_application_credentials, project=self.gcp_project_id
+            )
+        return storage.Client(project=self.gcp_project_id)
+
+    def pubsub_publisher(self):
+        """Return a Pub/Sub PublisherClient (ADC-authenticated)."""
+        from google.cloud import pubsub_v1
+
+        return pubsub_v1.PublisherClient()
+
+    def pubsub_subscriber(self):
+        """Return a Pub/Sub SubscriberClient (ADC-authenticated)."""
+        from google.cloud import pubsub_v1
+
+        return pubsub_v1.SubscriberClient()
 
 
 @lru_cache

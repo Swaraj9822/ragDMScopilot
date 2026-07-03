@@ -93,7 +93,7 @@ class FakeQueue:
         return self.messages
 
     def delete(self, received: ReceivedIngestionJob) -> None:
-        self.deleted.append(received.receipt_handle)
+        self.deleted.append(received.ack_id)
 
 
 def test_worker_processes_job_and_deletes_message_after_success() -> None:
@@ -182,8 +182,8 @@ def test_worker_overlaps_blocking_ingestion_stages() -> None:
     service = object.__new__(RagService)
     service._settings = SimpleNamespace(
         sparse_enabled=False,
-        bedrock_embedding_model_id="embed-model",
-        s3_bucket="bucket",
+        embedding_model_id="embed-model",
+        gcs_bucket="bucket",
         pinecone_index_name="index",
         ingestion_max_concurrency=4,
     )
@@ -205,7 +205,7 @@ def test_worker_overlaps_blocking_ingestion_stages() -> None:
                 filename=r.title,
                 s3_uri=r.s3_uri,
             ),
-            receipt_handle=f"receipt-{i}",
+            ack_id=f"receipt-{i}",
             message_id=f"message-{i}",
         )
         for i, r in enumerate(records)
@@ -263,7 +263,7 @@ def _received_job(record: DocumentRecord) -> ReceivedIngestionJob:
             filename=record.title,
             s3_uri=record.s3_uri,
         ),
-        receipt_handle="receipt-1",
+        ack_id="receipt-1",
         message_id="message-1",
     )
 
@@ -278,8 +278,8 @@ def _service(
     service = object.__new__(RagService)
     service._settings = SimpleNamespace(
         sparse_enabled=False,
-        bedrock_embedding_model_id="embed-model",
-        s3_bucket="bucket",
+        embedding_model_id="embed-model",
+        gcs_bucket="bucket",
         pinecone_index_name="index",
     )
     service._store = store

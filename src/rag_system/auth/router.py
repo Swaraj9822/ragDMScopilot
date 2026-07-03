@@ -7,9 +7,13 @@ exists); ``/auth/me`` is protected and echoes the authenticated user. Mount with
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 
-from rag_system.auth.dependencies import get_auth_service, get_current_user
+from rag_system.auth.dependencies import (
+    get_auth_service,
+    get_current_user,
+    resolve_is_operator,
+)
 from rag_system.auth.models import (
     AccessTokenResponse,
     LoginRequest,
@@ -81,21 +85,43 @@ def _access_body(pair: TokenResponse) -> AccessTokenResponse:
     )
 
 # Shared per-process limiter for credential-bearing endpoints. A per-minute
-# allowance of 0 disables throttling. Built once at import from settings; the
-# dependency it backs reads the client identity per request.
-_auth_rpm = get_settings().auth_rate_limit_per_minute
-_auth_limiter: SlidingWindowRateLimiter | None = (
-    SlidingWindowRateLimiter(limit=_auth_rpm, window_seconds=60.0)
-    if _auth_rpm > 0
-    else None
-)
+# allowance of 0 disables throttling. The limiter is resolved lazily on the
+# first request (not at import) so importing this module never reads settings —
+# keeping app/test collection independent of the runtime configuration.
+_auth_limiter: SlidingWindowRateLimiter | None = None
+_auth_limiter_ready = False
+
+
+def _get_auth_limiter() -> SlidingWindowRateLimiter | None:
+    """Build (once) and return the shared auth limiter from settings.
+
+    Returns ``None`` when throttling is disabled (per-minute allowance 0).
+    """
+    global _auth_limiter, _auth_limiter_ready
+    if not _auth_limiter_ready:
+        rpm = get_settings().auth_rate_limit_per_minute
+        _auth_limiter = (
+            SlidingWindowRateLimiter(limit=rpm, window_seconds=60.0) if rpm > 0 else None
+        )
+        _auth_limiter_ready = True
+    return _auth_limiter
 
 
 def _auth_rate_limit(scope: str):
-    """Dependency list throttling *scope*, or empty when limiting is disabled."""
-    if _auth_limiter is None:
-        return []
-    return [Depends(rate_limit(_auth_limiter, scope=scope))]
+    """Dependency list throttling *scope*.
+
+    The returned dependency resolves the shared limiter lazily on first request,
+    so the decorator that consumes this list at import time does not read
+    settings. When throttling is disabled the dependency is a no-op.
+    """
+
+    def dependency(request: Request) -> None:
+        limiter = _get_auth_limiter()
+        if limiter is None:
+            return
+        rate_limit(limiter, scope=scope)(request)
+
+    return [Depends(dependency)]
 
 
 @router.post(
@@ -230,6 +256,19 @@ def logout(
 
 
 @router.get("/me", response_model=UserPublic)
-def me(current_user: UserPublic = Depends(get_current_user)) -> UserPublic:
-    """Return the currently authenticated user."""
+def me(
+    current_user: UserPublic = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> UserPublic:
+    """Return the currently authenticated user.
+
+    Resolves operator status the same way :func:`require_operator` does (stored
+    ``is_operator`` flag OR ``operator_emails`` allow-list membership) so the
+    flag the frontend uses to gate operator-only navigation matches what the
+    backend actually authorizes. Without this, an allow-listed operator whose
+    stored flag is unset would be authorized by operator endpoints while the UI
+    hid the operator tabs.
+    """
+    if not current_user.is_operator and resolve_is_operator(current_user, settings):
+        return current_user.model_copy(update={"is_operator": True})
     return current_user

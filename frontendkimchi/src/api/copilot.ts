@@ -1,6 +1,9 @@
 import { apiClient, API_BASE_URL, newTraceId, ApiError, NetworkError, TIMEOUT_LONG_MS, TIMEOUT_SHORT_MS, refreshAccessToken } from "./client";
 import { getAccessToken } from "./tokenStore";
 import type {
+  AbstentionResponse,
+  ClarificationPrompt,
+  ConversationRecord,
   HealthResponse,
   QueryFeedbackRecord,
   QueryFeedbackRequest,
@@ -62,7 +65,41 @@ export interface AskParams {
   question: string;
   documentIds: string[] | null;
   includeSql: boolean;
+  /** Conversation to continue; null/undefined starts a new one server-side. */
+  conversationId?: string | null;
+  /** Ignore prior turns for this request and clear accumulated context. */
+  forgetContext?: boolean;
   signal?: AbortSignal;
+}
+
+function buildAskPayload(params: AskParams): UnifiedQueryRequest {
+  return {
+    question: params.question,
+    document_ids: params.documentIds && params.documentIds.length ? params.documentIds : null,
+    include_sql: params.includeSql,
+    conversation_id: params.conversationId ?? null,
+    forget_context: params.forgetContext ?? false,
+  };
+}
+
+/** Fetch a stored conversation (history, rewritten queries, document scope). */
+export function getConversation(conversationId: string): Promise<ConversationRecord> {
+  return apiClient.get<ConversationRecord>(
+    `/conversations/${encodeURIComponent(conversationId)}`,
+    { timeoutMs: TIMEOUT_SHORT_MS },
+  );
+}
+
+/**
+ * Forget a conversation's accumulated context, preserving its document scope.
+ * Subsequent follow-ups stop referencing earlier turns.
+ */
+export function forgetConversation(conversationId: string): Promise<ConversationRecord> {
+  return apiClient.postJson<ConversationRecord>(
+    `/conversations/${encodeURIComponent(conversationId)}/forget`,
+    {},
+    { timeoutMs: TIMEOUT_SHORT_MS },
+  );
 }
 
 export interface AskResult {
@@ -75,11 +112,7 @@ export interface AskResult {
 
 export async function ask(params: AskParams): Promise<AskResult> {
   const traceId = newTraceId();
-  const payload: UnifiedQueryRequest = {
-    question: params.question,
-    document_ids: params.documentIds && params.documentIds.length ? params.documentIds : null,
-    include_sql: params.includeSql,
-  };
+  const payload = buildAskPayload(params);
   const started = performance.now();
   const response = await apiClient.postJson<UnifiedQueryResponse>("/ask", payload, {
     timeoutMs: TIMEOUT_LONG_MS,
@@ -101,6 +134,10 @@ export interface StreamMeta {
   trace_id: string;
   route: string;
   routing_reasoning: string | null;
+  /** Conversation this turn belongs to (mint-on-first-turn). */
+  conversation_id?: string | null;
+  /** The standalone rewrite of a follow-up, surfaced for transparency. */
+  rewritten_question?: string | null;
 }
 
 export interface StreamHandlers {
@@ -110,8 +147,12 @@ export interface StreamHandlers {
   onStatus?: (stage: string) => void;
   /** Incremental answer text. */
   onDelta?: (text: string) => void;
-  /** Terminal event with the complete structured response. */
+  /** Terminal event carrying the complete structured answer (kind: "answer"). */
   onFinal?: (response: UnifiedQueryResponse) => void;
+  /** Terminal event asking for clarification instead of answering (kind: "clarification"). */
+  onClarification?: (prompt: ClarificationPrompt) => void;
+  /** Terminal event abstaining with no answer content (kind: "abstention"). */
+  onAbstention?: (response: AbstentionResponse) => void;
   /** Server-side error surfaced mid-stream. */
   onStreamError?: (detail: string) => void;
 }
@@ -131,11 +172,7 @@ export async function askStream(
   handlers: StreamHandlers,
 ): Promise<AskStreamResult> {
   const traceId = newTraceId();
-  const payload: UnifiedQueryRequest = {
-    question: params.question,
-    document_ids: params.documentIds && params.documentIds.length ? params.documentIds : null,
-    include_sql: params.includeSql,
-  };
+  const payload = buildAskPayload(params);
   const started = performance.now();
 
   let response: Response;
@@ -241,8 +278,23 @@ function dispatchSseFrame(frame: string, handlers: StreamHandlers): void {
       handlers.onDelta?.(String(data.text ?? ""));
       break;
     case "final":
+      // Legacy/simple shape: the whole frame is the response.
       handlers.onFinal?.(data as unknown as UnifiedQueryResponse);
       break;
+    case "terminal": {
+      // Held-answer contract (R3.7): exactly one terminal event carrying a
+      // `kind` discriminator and the structured payload under `payload`.
+      const kind = String(data.kind ?? "");
+      const payload = (data.payload ?? {}) as Record<string, unknown>;
+      if (kind === "clarification") {
+        handlers.onClarification?.(payload as unknown as ClarificationPrompt);
+      } else if (kind === "abstention") {
+        handlers.onAbstention?.(payload as unknown as AbstentionResponse);
+      } else {
+        handlers.onFinal?.(payload as unknown as UnifiedQueryResponse);
+      }
+      break;
+    }
     case "error":
       handlers.onStreamError?.(String(data.detail ?? "Streaming failed."));
       break;

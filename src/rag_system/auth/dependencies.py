@@ -22,7 +22,13 @@ from rag_system.auth.service import AuthService
 from rag_system.auth.tokens import TokenError, decode_token
 from rag_system.config import Settings, get_settings
 
-__all__ = ["get_auth_service", "get_current_user", "bearer_scheme"]
+__all__ = [
+    "get_auth_service",
+    "get_current_user",
+    "require_operator",
+    "resolve_is_operator",
+    "bearer_scheme",
+]
 
 # auto_error=False so a missing header yields our own 401 (with the
 # WWW-Authenticate hint) rather than FastAPI's default 403.
@@ -82,3 +88,46 @@ def get_current_user(
         raise _unauthorized("This account is disabled.")
 
     return user.to_public()
+
+
+def resolve_is_operator(user: UserPublic, settings: Settings) -> bool:
+    """Resolve a user's operator status: stored flag OR allow-list membership.
+
+    A user is an operator when their stored ``is_operator`` flag is set OR their
+    (normalized) email appears in the configured ``operator_emails`` allow-list.
+    This is the single place operator status is decided, so a richer role model
+    can later replace the allow-list without changing endpoint contracts.
+    """
+    if user.is_operator:
+        return True
+    return user.email.strip().lower() in settings.operator_emails_set
+
+
+def require_operator(
+    user: UserPublic = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> UserPublic:
+    """Require the caller to be an operator, or raise ``403 operator_required``.
+
+    Reuses :func:`get_current_user` for authentication (so an unauthenticated
+    caller still gets the existing ``401``), then asserts operator status via
+    :func:`resolve_is_operator`. A non-operator is rejected with a ``403`` whose
+    detail is ``operator_required``. When auth is disabled the anonymous user is
+    allowed through, matching the trusted-deployment behavior of
+    :func:`get_current_user`.
+
+    Returns the resolved user with ``is_operator`` reflecting the resolution, so
+    downstream handlers see an accurate flag even for allow-listed operators.
+    """
+    if not settings.auth_enabled:
+        return user
+
+    if not resolve_is_operator(user, settings):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="operator_required",
+        )
+
+    if user.is_operator:
+        return user
+    return user.model_copy(update={"is_operator": True})

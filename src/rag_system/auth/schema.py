@@ -31,14 +31,18 @@ USERS_DDL: tuple[str, ...] = (
         email         TEXT NOT NULL,
         password_hash TEXT NOT NULL,
         is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+        is_operator   BOOLEAN NOT NULL DEFAULT FALSE,
         created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
+    # Additive migration for tables created before the operator column existed;
+    # ``IF NOT EXISTS`` keeps it idempotent on every startup.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_operator BOOLEAN NOT NULL DEFAULT FALSE",
     # Case-insensitive uniqueness: nobody can register "User@x.com" and
     # "user@x.com" as two accounts, and login can match case-insensitively.
     "CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_key ON users (lower(email))",
 )
-"""DDL for the ``users`` table and its case-insensitive unique email index."""
+"""DDL for the ``users`` table, its operator column, and its email index."""
 
 REFRESH_TOKENS_DDL: tuple[str, ...] = (
     """

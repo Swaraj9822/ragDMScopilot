@@ -55,3 +55,28 @@ def test_user_record_to_public_drops_password_hash():
     assert public.email == "user@example.com"
     assert not hasattr(public, "password_hash")
     assert "secret" not in public.model_dump_json()
+
+
+def test_user_record_defaults_to_non_operator():
+    record = UserRecord(
+        id="abc",
+        email="user@example.com",
+        password_hash="x",
+        is_active=True,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    assert record.is_operator is False
+    assert record.to_public().is_operator is False
+
+
+@pytest.mark.parametrize("is_operator", [True, False])
+def test_user_record_to_public_copies_is_operator(is_operator):
+    record = UserRecord(
+        id="abc",
+        email="user@example.com",
+        password_hash="x",
+        is_active=True,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        is_operator=is_operator,
+    )
+    assert record.to_public().is_operator is is_operator

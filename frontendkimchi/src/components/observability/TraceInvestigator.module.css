@@ -1,0 +1,160 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.diagnoseBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.diagnosing {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.result {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-card);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.causeSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.causeLabel {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.causeDescription {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
+.noCause {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.analyzedElements {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.elementBadge {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+}
+
+.recommendationsSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.recommendationsLabel {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.readOnlyNotice {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.recommendationList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.recommendationItem {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.recommendationIcon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--text-muted);
+}
+
+.recommendationContent {
+  flex: 1;
+  min-width: 0;
+}
+
+.recommendationDescription {
+  color: var(--text-primary);
+}
+
+.targetBadge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin-left: var(--space-2);
+}
+
+.targetConfig {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.targetCorpus {
+  background: var(--success-soft, rgba(34, 197, 94, 0.1));
+  color: var(--success, #16a34a);
+  border: 1px solid var(--success, #16a34a);
+}
+
+.errorMessage {
+  font-size: 14px;
+  color: var(--danger);
+}

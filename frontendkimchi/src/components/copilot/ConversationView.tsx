@@ -1,4 +1,4 @@
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, Wand2 } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CopilotExchange } from "../../hooks/useCopilotHistory";
@@ -15,6 +15,7 @@ interface ConversationViewProps {
   streamText: string;
   streamStage: string | null;
   streamRoute: string | null;
+  streamRewritten: string | null;
 }
 
 const STAGE_LABELS: Record<string, string> = {
@@ -36,12 +37,14 @@ export function ConversationView({
   streamText,
   streamStage,
   streamRoute,
+  streamRewritten,
 }: ConversationViewProps) {
   return (
     <div className={styles.thread}>
       {exchanges.map((ex) => (
         <div key={ex.id} className={styles.exchange}>
           <UserMessage text={ex.question} />
+          {ex.rewrittenQuestion && <RewrittenNote text={ex.rewrittenQuestion} />}
           <AnswerCard response={ex.response} elapsedMs={ex.elapsedMs} />
         </div>
       ))}
@@ -49,6 +52,7 @@ export function ConversationView({
       {pendingQuestion !== null && (
         <div className={styles.exchange}>
           <UserMessage text={pendingQuestion} />
+          {streamRewritten && <RewrittenNote text={streamRewritten} />}
           {error ? (
             <div className={styles.error} role="alert">
               <p>{error.message}</p>
@@ -100,6 +104,20 @@ function UserMessage({ text }: { text: string }) {
     <div className={styles.userMessage}>
       <span className={styles.userLabel}>You</span>
       <p className={styles.userText}>{text}</p>
+    </div>
+  );
+}
+
+/**
+ * Shows how a follow-up was interpreted as a standalone query. Surfacing the
+ * rewrite keeps the copilot's context handling transparent to the user.
+ */
+function RewrittenNote({ text }: { text: string }) {
+  return (
+    <div className={styles.rewritten} aria-label="Interpreted question">
+      <Wand2 size={12} aria-hidden="true" />
+      <span className={styles.rewrittenLabel}>Interpreted as</span>
+      <span className={styles.rewrittenText}>{text}</span>
     </div>
   );
 }

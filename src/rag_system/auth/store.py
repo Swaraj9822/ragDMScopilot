@@ -27,11 +27,11 @@ logger = get_logger(__name__)
 
 __all__ = ["EmailAlreadyExistsError", "PostgresUserStore"]
 
-_COLUMNS = "id, email, password_hash, is_active, created_at"
+_COLUMNS = "id, email, password_hash, is_active, is_operator, created_at"
 
 _INSERT_SQL = f"""
-    INSERT INTO users (id, email, password_hash, is_active, created_at)
-    VALUES (%s, %s, %s, %s, %s::timestamptz)
+    INSERT INTO users (id, email, password_hash, is_active, is_operator, created_at)
+    VALUES (%s, %s, %s, %s, %s, %s::timestamptz)
     RETURNING {_COLUMNS}
 """
 
@@ -52,8 +52,8 @@ _ADVISORY_XACT_LOCK_SQL = "SELECT pg_advisory_xact_lock(%s)"
 # a concurrent attempt blocks on the lock, then finds the row already present
 # and inserts nothing (RETURNING yields zero rows).
 _INSERT_BOOTSTRAP_SQL = f"""
-    INSERT INTO users (id, email, password_hash, is_active, created_at)
-    SELECT %s, %s, %s, %s, %s::timestamptz
+    INSERT INTO users (id, email, password_hash, is_active, is_operator, created_at)
+    SELECT %s, %s, %s, %s, %s, %s::timestamptz
     WHERE NOT EXISTS (SELECT 1 FROM users)
     RETURNING {_COLUMNS}
 """
@@ -93,7 +93,14 @@ class PostgresUserStore:
                 with conn.cursor() as cur:
                     cur.execute(
                         _INSERT_SQL,
-                        (user_id, email, password_hash, True, created_at.isoformat()),
+                        (
+                            user_id,
+                            email,
+                            password_hash,
+                            True,
+                            False,
+                            created_at.isoformat(),
+                        ),
                     )
                     row = cur.fetchone()
         except Exception as exc:  # noqa: BLE001 - inspect for unique violation
@@ -120,7 +127,14 @@ class PostgresUserStore:
                 cur.execute(_ADVISORY_XACT_LOCK_SQL, (_BOOTSTRAP_LOCK_KEY,))
                 cur.execute(
                     _INSERT_BOOTSTRAP_SQL,
-                    (user_id, email, password_hash, True, created_at.isoformat()),
+                    (
+                        user_id,
+                        email,
+                        password_hash,
+                        True,
+                        False,
+                        created_at.isoformat(),
+                    ),
                 )
                 row = cur.fetchone()
         if row is None:
@@ -155,12 +169,13 @@ class PostgresUserStore:
 
 
 def _row_to_user(row: Any) -> UserRecord:
-    user_id, email, password_hash, is_active, created_at = row
+    user_id, email, password_hash, is_active, is_operator, created_at = row
     return UserRecord(
         id=str(user_id),
         email=email,
         password_hash=password_hash,
         is_active=bool(is_active),
+        is_operator=bool(is_operator),
         created_at=_coerce_utc(created_at),
     )
 

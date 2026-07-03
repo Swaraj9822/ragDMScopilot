@@ -3,6 +3,7 @@ import re
 from textwrap import dedent
 from typing import Any, Iterator
 
+from rag_system.claims import ClaimMapper, ClaimMappingResult
 from rag_system.config import Settings
 from rag_system.confidence import rag_confidence_score
 from rag_system.llm import build_text_llm
@@ -22,6 +23,7 @@ class GroundedAnswerGenerator:
     def __init__(self, settings: Settings):
         self._llm = build_text_llm(settings)
         self._model_id = self._llm.model_id
+        self._claim_mapper = ClaimMapper(settings, llm=self._llm)
 
     @retry_on_transient()
     def _call_llm(self, prompt: str) -> tuple[str, dict[str, Any]]:
@@ -149,6 +151,13 @@ class GroundedAnswerGenerator:
             confidence_score,
             {"model_id": self._model_id, "evidence_status": evidence_status},
         )
+
+        # --- Claim-level evidence mapping (R1, task 2.6) ---
+        # Call the mapper after prose + citation validation; on decomposition
+        # failure return empty claims list with claim_decomposition_failed=true
+        # without raising.
+        claim_result = self._run_claim_mapping(answer_text, hits, trace_id)
+
         return QueryResponse(
             answer=answer_text,
             citations=citations,
@@ -157,6 +166,9 @@ class GroundedAnswerGenerator:
             confidence=confidence,
             confidence_score=confidence_score,
             insufficient_evidence_reason=insufficient_reason,
+            claims=claim_result.claims,
+            claim_decomposition_failed=claim_result.decomposition_failed,
+            retrieval_scores=[hit.score for hit in hits],
         )
 
     def answer_stream(
@@ -273,6 +285,10 @@ class GroundedAnswerGenerator:
             confidence_score,
             {"model_id": self._model_id, "evidence_status": evidence_status},
         )
+
+        # --- Claim-level evidence mapping (R1, task 2.6) ---
+        claim_result = self._run_claim_mapping(answer_text, hits, trace_id)
+
         yield {
             "type": "final",
             "response": QueryResponse(
@@ -283,8 +299,31 @@ class GroundedAnswerGenerator:
                 confidence=confidence,
                 confidence_score=confidence_score,
                 insufficient_evidence_reason=insufficient_reason,
+                claims=claim_result.claims,
+                claim_decomposition_failed=claim_result.decomposition_failed,
+                retrieval_scores=[hit.score for hit in hits],
             ),
         }
+
+    def _run_claim_mapping(
+        self, answer_text: str, hits: list[RetrievalHit], trace_id: str
+    ) -> ClaimMappingResult:
+        """Run claim decomposition + evidence verification (R1, task 2.6).
+
+        Called after prose generation and citation validation. On any failure
+        returns an empty claims list with ``decomposition_failed=True`` without
+        raising (R1.9).
+        """
+        try:
+            return self._claim_mapper.map_claims(answer_text, hits, trace_id)
+        except Exception:  # noqa: BLE001 - fail closed, never raise (R1.9)
+            logger.warning(
+                "Claim mapping raised unexpectedly; returning empty claims",
+                extra={"trace_id": trace_id, "model_id": self._model_id},
+            )
+            return ClaimMappingResult(
+                claims=[], decomposition_failed=True, conflicting_claim_ids=set()
+            )
 
 
 def build_grounded_prompt(question: str, context: str) -> str:

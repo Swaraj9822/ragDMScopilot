@@ -115,6 +115,9 @@ def group_spans_by_trace(
         root = next((s for s in group if s.parent_span_id is None), None)
         anchor = root if root is not None else min(group, key=lambda s: s.start_ts)
         route = route_of(anchor) or anchor.operation
+        # Propagate AI configuration version from the root span (R9.1, R9.2).
+        config_version_id = getattr(anchor, "_trace_config_version_id", None)
+        resolved_settings = getattr(anchor, "_trace_resolved_settings", {})
         traces.append(
             Trace(
                 trace_id=trace_id,
@@ -123,6 +126,8 @@ def group_spans_by_trace(
                 duration_ms=anchor.duration_ms,
                 root_status=anchor.status,
                 spans=list(group),
+                ai_configuration_version_id=config_version_id,
+                resolved_settings=resolved_settings if isinstance(resolved_settings, dict) else {},
             )
         )
     return traces

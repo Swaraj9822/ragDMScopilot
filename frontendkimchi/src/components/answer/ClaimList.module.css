@@ -1,0 +1,85 @@
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.claim {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+  transition: border-color var(--motion-fast) var(--easing),
+    background var(--motion-fast) var(--easing);
+}
+
+.claim:hover {
+  border-color: var(--border-strong);
+}
+
+.claimText {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+/* ---------------------------------------------------------------------------
+ * Status indicators — distinct per status via icon + shape + text label.
+ * Not color-only: each status uses a unique shape (circle, half-circle,
+ * cross/x, question mark) combined with a text label and unique icon.
+ * -------------------------------------------------------------------------*/
+
+.indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+
+/* Supported: filled circle icon, green tone, rounded pill shape */
+.indicatorSupported {
+  color: var(--success);
+  background: var(--success-soft, rgba(34, 197, 94, 0.08));
+  border: 1px solid var(--success);
+}
+
+/* Partially supported: half-circle icon, amber/warning tone, notched shape */
+.indicatorPartial {
+  color: var(--warning, #d97706);
+  background: var(--warning-soft, rgba(217, 119, 6, 0.08));
+  border: 1px solid var(--warning, #d97706);
+  border-left-width: 3px;
+}
+
+/* Unsupported: x-circle icon, red/danger tone, square-ish shape */
+.indicatorUnsupported {
+  color: var(--danger);
+  background: var(--danger-soft, rgba(239, 68, 68, 0.08));
+  border: 1px solid var(--danger);
+  border-radius: 2px;
+}
+
+/* Verification unavailable: help-circle icon, muted/neutral tone, dashed border */
+.indicatorUnavailable {
+  color: var(--text-muted);
+  background: var(--bg-raised, rgba(148, 163, 184, 0.08));
+  border: 1px dashed var(--text-muted);
+}
+
+.indicatorIcon {
+  flex-shrink: 0;
+}

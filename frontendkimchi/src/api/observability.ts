@@ -1,5 +1,5 @@
-import { apiClient, TIMEOUT_SHORT_MS } from "./client";
-import type { LogRecord, Trace } from "./types";
+import { apiClient, TIMEOUT_LONG_MS, TIMEOUT_SHORT_MS } from "./client";
+import type { LogRecord, Trace, TraceDiagnosis } from "./types";
 
 export interface TraceSearchParams {
   start?: string | null;
@@ -62,4 +62,13 @@ export function getLogsByTrace(traceId: string): Promise<LogRecord[]> {
   return apiClient.get<LogRecord[]>(`/logs/${encodeURIComponent(traceId)}`, {
     timeoutMs: TIMEOUT_SHORT_MS,
   });
+}
+
+
+export function diagnoseTrace(traceId: string): Promise<TraceDiagnosis> {
+  return apiClient.postJson<TraceDiagnosis>(
+    `/traces/${encodeURIComponent(traceId)}/diagnose`,
+    {},
+    { timeoutMs: TIMEOUT_LONG_MS },
+  );
 }

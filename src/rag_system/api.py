@@ -26,8 +26,11 @@ from fastapi.routing import APIRoute
 
 from rag_system.auth import apply_schema as apply_auth_schema
 from rag_system.auth import get_current_user
+from rag_system.auth import require_operator
 from rag_system.auth import router as auth_router
-from rag_system.config import get_settings
+from rag_system.auth.models import UserPublic
+from rag_system.config import Settings, get_settings
+from rag_system.conversation import ConversationManager
 from rag_system.copilot import DatabaseCopilotService, SqlValidationError
 from rag_system.observability_tracing import get_span_recorder
 from rag_system.observability_tracing.buffers import BoundedLogBuffer
@@ -44,14 +47,39 @@ from rag_system.observability_tracing.trace_store import (
     TraceSearchFilters,
 )
 from rag_system.models import (
+    AbstentionResponse,
+    ActivationEvent,
+    AIConfigCreateRequest,
+    AIConfigRollbackRequest,
+    AIConfigurationVersion,
+    BenchmarkCase,
+    ClarificationPrompt,
+    ClarificationReplyRequest,
+    ConversationRecord,
     CopilotQueryRequest,
     CopilotQueryResponse,
+    CorpusPage,
+    CorpusSnapshotSummary,
+    CreateCorpusSnapshotRequest,
+    CreateCorpusSnapshotResponse,
+    DocumentHistory,
     DocumentRecord,
+    DocumentStatus,
+    EvaluationRunDetail,
+    EvaluationRunSummary,
+    FeedbackClassifyRequest,
+    FeedbackInboxPage,
+    FeedbackReviewRecord,
+    KnowledgeGapMap,
+    ReviewStatus,
     QueryFeedbackRecord,
     QueryFeedbackRequest,
     QueryRequest,
     QueryResponse,
     QueryTraceRecord,
+    ReplayRun,
+    ReplayRunRequest,
+    TraceDiagnosis,
     UnifiedQueryRequest,
     UnifiedQueryResponse,
 )
@@ -65,7 +93,13 @@ from rag_system.observability import (
 )
 from rag_system.parsing import SUPPORTED_EXTENSIONS
 from rag_system.router import AgenticRouter
-from rag_system.service import RagService
+from rag_system.clarification import (
+    ClarificationInvalidOrExpiredError,
+    ClarificationReplyProcessor,
+    ClarificationReplyRequiredError,
+    ClarificationStore,
+)
+from rag_system.service import DocumentVersionNotFoundError, RagService
 
 setup_logging()
 logger = get_logger(__name__)
@@ -141,6 +175,16 @@ def get_copilot_service() -> DatabaseCopilotService:
 
 
 @lru_cache
+def get_conversations() -> ConversationManager:
+    """Server-side multi-turn conversation store + follow-up rewriter.
+
+    Shares the RAG service's S3 artifact store so conversations live alongside
+    documents and query traces in the same bucket.
+    """
+    return ConversationManager(store=get_service().artifact_store, settings=get_settings())
+
+
+@lru_cache
 def get_router() -> AgenticRouter:
     settings = get_settings()
     rag = get_service()
@@ -149,7 +193,7 @@ def get_router() -> AgenticRouter:
     except Exception:
         logger.warning("Copilot service unavailable — router will use RAG only")
         copilot = None
-    return AgenticRouter(settings, rag, copilot)
+    return AgenticRouter(settings, rag, copilot, conversations=get_conversations())
 
 
 @lru_cache
@@ -375,7 +419,9 @@ async def log_requests(request: Request, call_next):
             # persistence.
             with get_span_recorder().start_trace(
                 trace_id=trace_id, route=request.url.path, is_root_http=True
-            ):
+            ) as root_span:
+                if request.url.path in _ANSWER_TRACE_PATHS:
+                    _stamp_trace_config(root_span)
                 response = await call_next(request)
     except Exception:
         elapsed_ms = (time.perf_counter() - start) * 1000
@@ -599,20 +645,66 @@ def list_documents() -> list[DocumentRecord]:
     return get_service().list_documents()
 
 
-@app.post(
-    "/ask",
-    response_model=UnifiedQueryResponse,
+@app.get(
+    "/documents/{document_id}/versions",
+    response_model=DocumentHistory,
     dependencies=[Depends(get_current_user)],
 )
-def ask(request: UnifiedQueryRequest) -> UnifiedQueryResponse:
-    """Unified endpoint — auto-routes to RAG, database copilot, or both."""
+def get_document_versions(document_id: str) -> DocumentHistory:
+    """Return a Document's version history and ingestion events (R5.7).
+
+    Versions and events are ordered by ingestion timestamp, most recent first.
+    """
+    history = get_service().get_document_history(document_id)
+    if history is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return history
+
+
+@app.post(
+    "/documents/{document_id}/versions/{version}/restore",
+    response_model=DocumentRecord,
+    dependencies=[Depends(require_operator)],
+)
+def restore_document_version(document_id: str, version: str) -> DocumentRecord:
+    """Restore a previous Document_Version as the Active_Version (R5.8-R5.11).
+
+    Operator-only. Re-indexes from retained source content when the version's
+    vectors were cleaned up, then flips the active pointer. An unknown version
+    yields ``version_not_found`` (404) with the active version unchanged.
+    """
+    try:
+        record = get_service().restore_version(document_id, version)
+    except DocumentVersionNotFoundError:
+        raise HTTPException(status_code=404, detail="version_not_found")
+    if record is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return record
+
+
+@app.post(
+    "/ask",
+    dependencies=[Depends(get_current_user)],
+)
+def ask(request: UnifiedQueryRequest) -> UnifiedQueryResponse | ClarificationPrompt | AbstentionResponse:
+    """Unified endpoint — auto-routes to RAG, database copilot, or both.
+
+    The answer path: classify → clarification gate → retrieval gates →
+    generate + claim mapping → abstention gates.
+
+    Returns one of:
+    - ``UnifiedQueryResponse`` with claims + evidence on success.
+    - ``ClarificationPrompt`` when the question is ambiguous (R2.1).
+    - ``AbstentionResponse`` when the system lacks sufficient evidence (R3).
+    """
     logger.info(
         "Unified query received (%d chars)",
         len(request.question),
         extra={"query_len": len(request.question)},
     )
     try:
-        return get_router().query(request)
+        result = get_router().query(request)
+        return result
     except (FileNotFoundError, RuntimeError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except SqlValidationError as exc:
@@ -625,21 +717,59 @@ def _format_sse(event: dict) -> str:
     return f"event: {event['type']}\ndata: {payload}\n\n"
 
 
+#: Non-stream routes that produce a query trace which should record the
+#: producing AI configuration version (R9.1). ``/ask/stream`` stamps its own
+#: trace inside the response generator.
+_ANSWER_TRACE_PATHS = frozenset({"/ask", "/query"})
+
+
+def _stamp_trace_config(span: object) -> None:
+    """Resolve the active AI configuration and stamp it on *span* (R9.1, R9.11).
+
+    Records the producing ``ai_configuration_version_id`` and its redacted
+    settings on the trace's root span so downstream consumers (feedback context,
+    replay comparison, trace diagnosis) can attribute an outcome to a config
+    version. Best-effort: any failure resolves to the ``unresolved`` sentinel
+    (R9.2) and never breaks the request.
+    """
+    try:
+        from rag_system.ai_config import AIConfigResolver, AIConfigurationStore
+        from rag_system.observability_tracing import build_trace_config_payload
+
+        resolver = AIConfigResolver(AIConfigurationStore(_get_artifact_store()))
+        resolved = resolver.resolve()
+        payload = build_trace_config_payload(resolved)
+        get_span_recorder().set_trace_config(
+            span,
+            ai_configuration_version_id=payload["ai_configuration_version_id"],
+            resolved_settings=payload["resolved_settings"],
+        )
+    except Exception:  # noqa: BLE001 - never let tracing break the answer path
+        logger.warning("Failed to stamp AI configuration on trace", exc_info=True)
+
+
 @app.post(_ASK_STREAM_PATH, dependencies=[Depends(get_current_user)])
 async def ask_stream(request: UnifiedQueryRequest, http_request: Request) -> StreamingResponse:
-    """Streaming variant of /ask.
+    """Streaming variant of /ask — holds answer content until gates pass.
 
-    Returns Server-Sent Events: ``meta`` (route), ``status`` (pipeline stage),
-    ``delta`` (incremental answer text), and a terminal ``final`` event with the
-    full structured payload (citations, sql, rows, confidence). Errors are
-    delivered as an ``error`` event rather than an HTTP status, since the
-    response has already started streaming.
+    Emits Server-Sent Events for stage progress (``classify``, ``retrieve``,
+    ``generate``, ``verify``) for liveness but **holds answer content** — it
+    does not forward generated tokens — until the abstention gates and
+    claim-verification have run. The stream ends with exactly **one terminal
+    event** carrying one of:
+
+    - The answer with claims/evidence (``kind: "answer"``).
+    - A ``Clarification_Prompt`` (``kind: "clarification"``).
+    - An ``Abstention_Response`` with no answer content (``kind: "abstention"``).
+
+    A post-generation abstention therefore leaks no tokens (R3.7).
+
+    Errors are delivered as an ``error`` event rather than an HTTP status, since
+    the response has already started streaming.
 
     The synchronous router generator is run in a single dedicated thread so the
     whole request shares one contextvars context (trace id, span stack, token
-    tally). Driving it via Starlette's per-iteration threadpool would copy the
-    context on every step and break trace/token propagation, so events are
-    bridged to the async response through a queue instead.
+    tally).
     """
     logger.info(
         "Unified streaming query received (%d chars)",
@@ -671,7 +801,8 @@ async def ask_stream(request: UnifiedQueryRequest, http_request: Request) -> Str
         try:
             with recorder.start_trace(
                 trace_id=trace_id, route=_ASK_STREAM_PATH, is_root_http=True
-            ):
+            ) as root_span:
+                _stamp_trace_config(root_span)
                 for event in router.query_stream(request):
                     if stop_event.is_set():
                         logger.info(
@@ -726,6 +857,78 @@ async def ask_stream(request: UnifiedQueryRequest, http_request: Request) -> Str
     )
 
 
+# ---------------------------------------------------------------------------
+# Clarification reply endpoint (R2.4–R2.8)
+# ---------------------------------------------------------------------------
+
+
+@app.post(
+    "/ask/clarify",
+    dependencies=[Depends(get_current_user)],
+)
+def ask_clarify(
+    request: ClarificationReplyRequest,
+) -> UnifiedQueryResponse | AbstentionResponse:
+    """Process a reply to a previously issued clarification (R2.4–R2.8).
+
+    Validates the clarification_id (existence + expiry, R2.5) and that the reply
+    is non-empty (R2.6), then re-runs the answer path with the combined question
+    scoped to the clarification record's document scope. The ambiguous branch is
+    disabled so at most one clarification is ever issued per original question
+    (R2.7). If still unresolved after the reply → abstention (R2.8).
+
+    Errors:
+    - 400 ``clarification_invalid_or_expired`` — unknown or expired id (R2.5).
+    - 400 ``clarification_reply_required`` — empty/whitespace-only reply (R2.6).
+    """
+    logger.info(
+        "Clarification reply received (id=%s, reply_len=%d)",
+        request.clarification_id,
+        len(request.reply),
+        extra={
+            "clarification_id": request.clarification_id,
+            "reply_len": len(request.reply),
+        },
+    )
+    router = get_router()
+    store = _get_clarification_store(router)
+
+    def answer_path(*, question: str, document_scope: list[str] | None):
+        """Re-run the answer path with clarification disabled (R2.7)."""
+        req = UnifiedQueryRequest(question=question, document_ids=document_scope)
+        return router.query(req, allow_clarification=False)
+
+    processor = ClarificationReplyProcessor(store=store, answer_path=answer_path)
+    try:
+        outcome = processor.process(
+            clarification_id=request.clarification_id, reply=request.reply
+        )
+    except ClarificationInvalidOrExpiredError:
+        raise HTTPException(
+            status_code=400, detail="clarification_invalid_or_expired"
+        )
+    except ClarificationReplyRequiredError:
+        raise HTTPException(
+            status_code=400, detail="clarification_reply_required"
+        )
+    return outcome
+
+
+def _get_clarification_store(router: AgenticRouter) -> ClarificationStore:
+    """Resolve the clarification store from the router or build one.
+
+    Falls back to creating a store from the RAG service's artifact store if the
+    router has not yet lazily initialized one.
+    """
+    store = router._clarification_store()
+    if store is not None:
+        return store
+    # Fallback: build from the RAG service artifact store.
+    service = get_service()
+    settings = get_settings()
+    return ClarificationStore(service.artifact_store, settings)
+
+
 @app.post(
     "/query",
     response_model=QueryResponse,
@@ -764,6 +967,41 @@ def record_query_feedback(
     record = get_service().record_query_feedback(trace_id, feedback)
     if not record:
         raise HTTPException(status_code=404, detail="Query trace not found.")
+    return record
+
+
+@app.get(
+    "/conversations/{conversation_id}",
+    response_model=ConversationRecord,
+    dependencies=[Depends(get_current_user)],
+)
+def get_conversation(conversation_id: str) -> ConversationRecord:
+    """Fetch a stored conversation and its turns.
+
+    Lets the console rehydrate a session (history + rewritten queries + document
+    scope) after a reload, and makes the server-side state inspectable.
+    """
+    record = get_conversations().load(conversation_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return record
+
+
+@app.post(
+    "/conversations/{conversation_id}/forget",
+    response_model=ConversationRecord,
+    dependencies=[Depends(get_current_user)],
+)
+def forget_conversation(conversation_id: str) -> ConversationRecord:
+    """Clear a conversation's accumulated context, preserving its document scope.
+
+    "Forget context" — subsequent follow-ups stop referencing earlier turns, but
+    the conversation id and selected-document scope carry on. Use "start new
+    topic" on the client (drop the conversation id) to begin a fresh one instead.
+    """
+    record = get_conversations().forget(conversation_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
     return record
 
 
@@ -933,3 +1171,742 @@ def search_logs(
         limit=limit if limit is not None else 100,
     )
     return get_log_store().search(filters)
+
+
+# ---------------------------------------------------------------------------
+# Replay and compare lab (R8)
+# ---------------------------------------------------------------------------
+
+
+def _get_replay_service():
+    """Lazily construct the ReplayService for replay endpoints."""
+    from rag_system.replay import ReplayService
+
+    store = _get_artifact_store()
+    return ReplayService(store, config_store=store)
+
+
+def _get_artifact_store():
+    """Return the shared S3ArtifactStore."""
+    from rag_system.storage import S3ArtifactStore
+
+    settings = get_settings()
+    return S3ArtifactStore(settings)
+
+
+@app.post(
+    "/replays",
+    response_model=ReplayRun,
+    status_code=201,
+    dependencies=[Depends(require_operator)],
+)
+def create_replay_run(request: ReplayRunRequest) -> ReplayRun:
+    """Initiate a replay run under an approved AI configuration (R8.1–R8.4).
+
+    Operator-only. Validates the referenced AI configuration version is approved
+    (with prompt/model drawn from it), retrieval params are within range, and the
+    corpus snapshot exists. On success creates a ``queued`` run and returns it
+    with its id, without blocking on execution (R8.2).
+    """
+    from rag_system.replay import ReplayValidationError
+
+    service = _get_replay_service()
+    try:
+        run = service.create_replay_run(request)
+    except ReplayValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.code) from exc
+    return run
+
+
+@app.get(
+    "/replays/{replay_run_id}",
+    response_model=ReplayRun,
+    dependencies=[Depends(require_operator)],
+)
+def get_replay_run(replay_run_id: str) -> ReplayRun:
+    """Return the current state of a Replay_Run (R8.10).
+
+    Operator-only. Returns the full :class:`ReplayRun` including its current
+    ``state``, the original request, and (when completed) the result.
+    """
+    from rag_system.storage import replay_run_key
+
+    store = _get_artifact_store()
+    payload = store.get_json(replay_run_key(replay_run_id))
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Replay run not found.")
+    return ReplayRun.model_validate(payload)
+
+
+@app.post(
+    "/replays/{replay_run_id}/cancel",
+    response_model=ReplayRun,
+    dependencies=[Depends(require_operator)],
+)
+def cancel_replay_run(replay_run_id: str) -> ReplayRun:
+    """Cancel a queued or running Replay_Run (R8.9).
+
+    Operator-only. Sets ``cancel_requested = true`` and transitions the run to
+    ``cancelled`` with no results. Cancelling a run already in a terminal state
+    (``completed``, ``failed``, ``cancelled``) is a no-op — the run is returned
+    unchanged. The worker checks the flag at stage boundaries.
+    """
+    from rag_system.replay import ReplayValidationError
+
+    service = _get_replay_service()
+    try:
+        return service.cancel_replay_run(replay_run_id)
+    except ReplayValidationError as exc:
+        if exc.code == "not_found":
+            raise HTTPException(status_code=404, detail="Replay run not found.") from exc
+        raise HTTPException(status_code=400, detail=exc.code) from exc
+
+
+@app.post(
+    "/corpus-snapshots",
+    response_model=CreateCorpusSnapshotResponse,
+    status_code=201,
+    dependencies=[Depends(require_operator)],
+)
+def create_corpus_snapshot(request: CreateCorpusSnapshotRequest) -> CreateCorpusSnapshotResponse:
+    """Capture the current active-version manifest as an immutable CorpusSnapshot (R8.1, R8.6).
+
+    Operator-only. Returns the minted ``corpus_snapshot_id`` (201 Created).
+
+    Accepts an optional ``document_ids`` subset scope: when provided, only those
+    documents are included in the manifest. When omitted, all documents with an
+    active version are captured.
+
+    Accepts an optional ``sql_fixture`` to capture SQL result rows alongside the
+    snapshot.
+    """
+    from rag_system.replay import ReplaySnapshotStore
+
+    service = get_service()
+    store = service.artifact_store
+
+    # Gather the active-version manifest from the current corpus.
+    all_documents = service.list_documents()
+
+    # Apply optional document-subset scope.
+    if request.document_ids is not None:
+        scope_set = set(request.document_ids)
+        all_documents = [doc for doc in all_documents if doc.id in scope_set]
+
+    # Build the manifest: only documents with an active version.
+    manifest: list[tuple[str, str]] = [
+        (doc.id, doc.active_version)
+        for doc in all_documents
+        if doc.active_version is not None
+    ]
+
+    # Create the immutable snapshot.
+    snapshot_store = ReplaySnapshotStore(store)
+    snapshot = snapshot_store.create_snapshot(manifest)
+
+    # Optionally capture the SQL result fixture alongside.
+    if request.sql_fixture is not None:
+        snapshot_store.create_sql_fixture(
+            corpus_snapshot_id=snapshot.corpus_snapshot_id,
+            sql=request.sql_fixture.sql,
+            rows=request.sql_fixture.rows,
+        )
+
+    return CreateCorpusSnapshotResponse(
+        corpus_snapshot_id=snapshot.corpus_snapshot_id,
+    )
+
+
+@app.get(
+    "/corpus-snapshots",
+    response_model=list[CorpusSnapshotSummary],
+    dependencies=[Depends(require_operator)],
+)
+def list_corpus_snapshots() -> list[CorpusSnapshotSummary]:
+    """List existing CorpusSnapshots (id + created_at + manifest size) (R8.1).
+
+    Operator-only. Returns all snapshots sorted by creation time (newest first)
+    so an operator can pick one when initiating a replay.
+    """
+    from rag_system.replay import ReplaySnapshotStore
+
+    service = get_service()
+    store = service.artifact_store
+
+    # List all snapshot keys from storage.
+    keys = store.list_corpus_snapshot_keys()
+
+    # Load each snapshot record.
+    snapshot_store = ReplaySnapshotStore(store)
+    snapshots = snapshot_store.list_snapshots(keys)
+
+    # Build summaries sorted by created_at descending (newest first).
+    summaries = [
+        CorpusSnapshotSummary(
+            corpus_snapshot_id=s.corpus_snapshot_id,
+            created_at=s.created_at,
+            manifest_size=len(s.manifest),
+        )
+        for s in snapshots
+    ]
+    summaries.sort(key=lambda s: s.created_at, reverse=True)
+
+    return summaries
+
+
+# ---------------------------------------------------------------------------
+# Feedback review inbox actions (R6.5–R6.11)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Feedback review inbox listing (R6.1–R6.4)
+# ---------------------------------------------------------------------------
+
+
+@app.get(
+    "/feedback",
+    response_model=FeedbackInboxPage,
+    dependencies=[Depends(require_operator)],
+)
+def list_feedback_endpoint(
+    _operator: UserPublic = Depends(require_operator),
+    settings: Settings = Depends(get_settings),
+    review_status: ReviewStatus | None = Query(
+        default=None, description="Filter by review status (unreviewed/reviewed/resolved)"
+    ),
+    cursor: str | None = Query(
+        default=None, description="Opaque pagination cursor from a previous page"
+    ),
+    page_size: int | None = Query(
+        default=None, description="Page size (clamped to the configured max)"
+    ),
+) -> FeedbackInboxPage:
+    """Cursor-paginated inbox of negative-rating feedback, newest-first (R6.1–R6.4).
+
+    Operator-only. Each item is joined with its query trace for full context;
+    an absent/expired trace yields empty context fields rather than dropping the
+    item. Rejects a tampered/invalid cursor with ``invalid_cursor``.
+    """
+    from rag_system.feedback import (
+        FeedbackListParams,
+        InvalidCursorError,
+        list_feedback_inbox,
+    )
+
+    service = get_service()
+    params = FeedbackListParams(
+        review_status=review_status,
+        page_size=page_size,
+        cursor=cursor,
+    )
+    try:
+        return list_feedback_inbox(
+            service.list_feedback_reviews(),
+            trace_of=lambda item: service.get_query_trace(item.trace_id),
+            params=params,
+            pagination_signing_key=settings.pagination_signing_key,
+            page_size_limit=settings.corpus_page_size,
+        )
+    except InvalidCursorError:
+        raise HTTPException(status_code=400, detail="invalid_cursor")
+
+
+@app.post(
+    "/feedback/{feedback_id}/classify",
+    response_model=FeedbackReviewRecord,
+    dependencies=[Depends(require_operator)],
+)
+def classify_feedback_endpoint(
+    feedback_id: str,
+    body: FeedbackClassifyRequest,
+    operator: UserPublic = Depends(require_operator),
+) -> FeedbackReviewRecord:
+    """Classify a Feedback_Item with a Failure_Category (R6.5, R6.10).
+
+    Operator-only. Validates the category against the six allowed values; rejects
+    with ``invalid_failure_category`` otherwise. Persists category, reviewer, and
+    timestamp; sets review_status to ``reviewed``, replacing any prior category.
+    """
+    from rag_system.feedback import InvalidFailureCategoryError
+
+    service = get_service()
+    try:
+        record = service.classify_feedback(
+            feedback_id, category=body.category, reviewer=operator.email
+        )
+    except InvalidFailureCategoryError:
+        raise HTTPException(status_code=400, detail="invalid_failure_category")
+    if record is None:
+        raise HTTPException(status_code=404, detail="Feedback item not found.")
+    return record
+
+
+@app.post(
+    "/feedback/{feedback_id}/promote",
+    response_model=BenchmarkCase,
+    dependencies=[Depends(require_operator)],
+)
+def promote_feedback_endpoint(
+    feedback_id: str,
+    _operator: UserPublic = Depends(require_operator),
+) -> BenchmarkCase:
+    """Promote a reviewed Feedback_Item into the Evaluation_Set (R6.6, R6.7, R6.11).
+
+    Operator-only. Creates one Benchmark_Case from the item's question and
+    expected answer. Returns ``expected_answer_required`` when no expected answer
+    is present; ``already_in_evaluation_set`` when the item was already promoted.
+    """
+    from rag_system.feedback import (
+        AlreadyInEvaluationSetError,
+        ExpectedAnswerRequiredError,
+    )
+
+    service = get_service()
+    try:
+        case = service.promote_feedback(feedback_id)
+    except ExpectedAnswerRequiredError:
+        raise HTTPException(status_code=400, detail="expected_answer_required")
+    except AlreadyInEvaluationSetError:
+        raise HTTPException(status_code=409, detail="already_in_evaluation_set")
+    if case is None:
+        raise HTTPException(status_code=404, detail="Feedback item not found.")
+    return case
+
+
+@app.post(
+    "/feedback/{feedback_id}/resolve",
+    response_model=FeedbackReviewRecord,
+    dependencies=[Depends(require_operator)],
+)
+def resolve_feedback_endpoint(
+    feedback_id: str,
+    _operator: UserPublic = Depends(require_operator),
+) -> FeedbackReviewRecord:
+    """Mark a Feedback_Item as resolved, keeping it in the inbox (R6.8).
+
+    Operator-only. Sets review_status to ``resolved``; the item remains visible
+    in the inbox and filterable by review_status.
+    """
+    service = get_service()
+    record = service.resolve_feedback(feedback_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Feedback item not found.")
+    return record
+
+
+# ---------------------------------------------------------------------------
+# Multi-method evaluation runs (R7)
+# ---------------------------------------------------------------------------
+
+
+@app.post(
+    "/evaluation/runs",
+    response_model=EvaluationRunDetail,
+    dependencies=[Depends(require_operator)],
+)
+def run_evaluation_endpoint(
+    _operator: UserPublic = Depends(require_operator),
+) -> EvaluationRunDetail:
+    """Trigger a deterministic evaluation run over the default set (R7.1–R7.6).
+
+    Operator-only. Returns the persisted run detail. Fails with
+    ``evaluation_set_invalid`` when the set has no human-reviewed case (R7.4).
+    """
+    from rag_system.evaluation import EvaluationSetValidationError
+
+    service = get_service()
+    try:
+        return service.run_evaluation()
+    except EvaluationSetValidationError as exc:
+        raise HTTPException(status_code=400, detail="evaluation_set_invalid") from exc
+
+
+@app.get(
+    "/evaluation/runs",
+    response_model=list[EvaluationRunSummary],
+    dependencies=[Depends(require_operator)],
+)
+def list_evaluation_runs_endpoint(
+    _operator: UserPublic = Depends(require_operator),
+) -> list[EvaluationRunSummary]:
+    """List persisted evaluation runs, newest first (R7.7). Operator-only."""
+    return get_service().list_evaluation_runs()
+
+
+@app.get(
+    "/evaluation/runs/{run_id}",
+    response_model=EvaluationRunDetail,
+    dependencies=[Depends(require_operator)],
+)
+def get_evaluation_run_endpoint(
+    run_id: str,
+    _operator: UserPublic = Depends(require_operator),
+) -> EvaluationRunDetail:
+    """Return the full detail of an evaluation run (R7.7). Operator-only."""
+    detail = get_service().get_evaluation_run(run_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="evaluation_run_not_found")
+    return detail
+
+
+# ---------------------------------------------------------------------------
+# Corpus listing (R4)
+# ---------------------------------------------------------------------------
+
+
+@app.get(
+    "/corpus",
+    response_model=CorpusPage,
+    dependencies=[Depends(get_current_user)],
+)
+def list_corpus_endpoint(
+    user: UserPublic = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    page_size: int | None = Query(default=None, description="Page size (clamped to configured max)"),
+    cursor: str | None = Query(default=None, description="Opaque pagination cursor from a previous page"),
+    sort_field: str | None = Query(default=None, description="Sort field: name, owner, or date"),
+    sort_direction: str | None = Query(default=None, description="Sort direction: asc or desc"),
+    status_filter: DocumentStatus | None = Query(default=None, alias="status", description="Filter by document status"),
+    owner_filter: str | None = Query(default=None, alias="owner", description="Filter by owner"),
+    date_from: str | None = Query(default=None, description="Inclusive lower bound on document date (ISO-8601)"),
+    date_to: str | None = Query(default=None, description="Inclusive upper bound on document date (ISO-8601)"),
+    active_version: str | None = Query(default=None, description="Filter by active version"),
+    search: str | None = Query(default=None, description="Case-insensitive metadata search (1-200 chars)"),
+) -> CorpusPage:
+    """Cursor-paginated corpus listing with sort/filter/search (R4.1–R4.14).
+
+    Available to all authenticated users. Non-operators see only documents whose
+    ``owner`` equals their authenticated identity; operators see the full corpus.
+    """
+    from rag_system.auth.dependencies import resolve_is_operator
+    from rag_system.corpus import (
+        CorpusListParams,
+        InvalidCursorError,
+        SearchTermTooLongError,
+        SortDirection,
+        SortField,
+        list_corpus,
+    )
+
+    is_operator = resolve_is_operator(user, settings)
+
+    # Build the listing params from query string values.
+    resolved_sort_field = SortField.name
+    if sort_field is not None:
+        try:
+            resolved_sort_field = SortField(sort_field)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid sort_field: '{sort_field}'. Must be one of: name, owner, date.",
+            )
+
+    resolved_sort_direction = SortDirection.asc
+    if sort_direction is not None:
+        try:
+            resolved_sort_direction = SortDirection(sort_direction)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid sort_direction: '{sort_direction}'. Must be one of: asc, desc.",
+            )
+
+    params = CorpusListParams(
+        sort_field=resolved_sort_field,
+        sort_direction=resolved_sort_direction,
+        status=status_filter,
+        owner=owner_filter,
+        active_version=active_version,
+        date_from=date_from,
+        date_to=date_to,
+        search=search,
+        page_size=page_size,
+        cursor=cursor,
+    )
+
+    # Fetch all documents from the backend to pass to the listing service.
+    all_documents = get_service().list_documents()
+
+    try:
+        return list_corpus(
+            all_documents,
+            viewer_identity=user.email,
+            is_operator=is_operator,
+            params=params,
+            pagination_signing_key=settings.pagination_signing_key,
+            corpus_page_size=settings.corpus_page_size,
+        )
+    except InvalidCursorError:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_cursor",
+        )
+    except SearchTermTooLongError:
+        raise HTTPException(
+            status_code=400,
+            detail="search_term_too_long",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Versioned AI configuration (R9)
+# ---------------------------------------------------------------------------
+
+
+def _get_ai_config_store():
+    """Lazily construct the AIConfigurationStore for ai-config endpoints."""
+    from rag_system.ai_config import AIConfigurationStore
+
+    store = _get_artifact_store()
+    return AIConfigurationStore(store)
+
+
+@app.put(
+    "/ai-config/{config_id}",
+    response_model=AIConfigurationVersion,
+    status_code=201,
+    dependencies=[Depends(require_operator)],
+)
+def create_ai_config_version(
+    config_id: str,
+    body: AIConfigCreateRequest,
+) -> AIConfigurationVersion:
+    """Create a new immutable AI configuration version (R9.3, R9.4).
+
+    Operator-only. Validates the 1–500 char change description; rejects with
+    ``change_description_required`` otherwise (no version created, active
+    unchanged).
+    """
+    from rag_system.ai_config import ChangeDescriptionRequiredError
+
+    config_store = _get_ai_config_store()
+    try:
+        version = config_store.create_version(
+            config_id,
+            prompt=body.prompt,
+            model=body.model,
+            router_threshold=body.router_threshold,
+            change_description=body.change_description,
+            output_schema=body.output_schema,
+            retrieval_settings=body.retrieval_settings,
+            reranker_config=body.reranker_config,
+        )
+    except ChangeDescriptionRequiredError:
+        raise HTTPException(status_code=400, detail="change_description_required")
+    return version
+
+
+@app.get(
+    "/ai-config/{config_id}/history",
+    response_model=list[AIConfigurationVersion],
+    dependencies=[Depends(require_operator)],
+)
+def get_ai_config_history(config_id: str) -> list[AIConfigurationVersion]:
+    """Return AI configuration versions reverse-chronologically (R9.5, R9.6).
+
+    Operator-only. Returns an empty list when no versions exist.
+    """
+    config_store = _get_ai_config_store()
+    return config_store.get_history(config_id)
+
+
+@app.post(
+    "/ai-config/{config_id}/rollback",
+    response_model=ActivationEvent,
+    status_code=200,
+    dependencies=[Depends(require_operator)],
+)
+def rollback_ai_config(
+    config_id: str,
+    body: AIConfigRollbackRequest,
+    operator: UserPublic = Depends(require_operator),
+) -> ActivationEvent:
+    """Rollback to an existing AI configuration version (R9.8, R9.9, R9.10).
+
+    Operator-only. Sets the target version active and records an ActivationEvent.
+    Unknown version → 404 ``configuration_version_not_found`` with active unchanged.
+    """
+    from rag_system.ai_config import ConfigurationVersionNotFoundError
+
+    config_store = _get_ai_config_store()
+    try:
+        event = config_store.rollback(
+            config_id,
+            version_id=body.version_id,
+            operator=operator.email,
+            reason=body.reason,
+        )
+    except ConfigurationVersionNotFoundError:
+        raise HTTPException(status_code=404, detail="configuration_version_not_found")
+    return event
+
+
+@app.post(
+    "/ai-config/{config_id}/versions/{version_id}/approve",
+    response_model=AIConfigurationVersion,
+    dependencies=[Depends(require_operator)],
+)
+def approve_ai_config_version(
+    config_id: str,
+    version_id: str,
+    operator: UserPublic = Depends(require_operator),
+) -> AIConfigurationVersion:
+    """Approve an AI configuration version (R8.3, R9.7).
+
+    Operator-only. Sets approved=True, records the approver identity and
+    approval timestamp. Approval does NOT mutate the version's governed settings
+    (prompt, model, output_schema, router_threshold, retrieval_settings,
+    reranker_config). Unknown version → 404 ``configuration_version_not_found``.
+    """
+    from rag_system.ai_config import ConfigurationVersionNotFoundError
+
+    config_store = _get_ai_config_store()
+    try:
+        approved_version = config_store.approve_version(
+            config_id,
+            version_id=version_id,
+            approver=operator.email,
+        )
+    except ConfigurationVersionNotFoundError:
+        raise HTTPException(status_code=404, detail="configuration_version_not_found")
+    return approved_version
+
+
+# ---------------------------------------------------------------------------
+# Trace Investigator (R10)
+# ---------------------------------------------------------------------------
+
+
+def _get_trace_investigator():
+    """Lazily construct the TraceInvestigator for the diagnose endpoint."""
+    from rag_system.trace_investigator import TraceInvestigator
+
+    settings = get_settings()
+    service = get_service()
+
+    def _resolve_trace(trace_id: str):
+        return service.get_query_trace(trace_id)
+
+    return TraceInvestigator(settings, trace_resolver=_resolve_trace)
+
+
+@app.post(
+    "/traces/{trace_id}/diagnose",
+    response_model=TraceDiagnosis,
+    dependencies=[Depends(require_operator)],
+)
+def diagnose_trace(trace_id: str) -> TraceDiagnosis:
+    """Diagnose a recorded query trace (R10.1, R10.6).
+
+    Operator-only. Loads the enriched query trace, analyzes route/retrieval/rerank/
+    generation outcome, and returns read-only recommendations. No mutations are
+    applied to the trace or any other state (R10.7).
+
+    Returns 404 ``trace_not_found`` when the trace is not recorded (R10.2).
+    """
+    from rag_system.trace_investigator import TraceNotFoundError
+
+    investigator = _get_trace_investigator()
+    try:
+        diagnosis = investigator.diagnose(trace_id)
+    except TraceNotFoundError:
+        raise HTTPException(status_code=404, detail="trace_not_found")
+    return diagnosis
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Gap Map (R11)
+# ---------------------------------------------------------------------------
+
+
+@app.post(
+    "/knowledge-gap-map",
+    response_model=KnowledgeGapMap,
+    dependencies=[Depends(require_operator)],
+)
+def generate_knowledge_gap_map_endpoint(
+    settings: Settings = Depends(get_settings),
+) -> KnowledgeGapMap:
+    """Generate the Knowledge Gap Map from eligible query outcomes (R11.1–R11.6).
+
+    Operator-only. Scans stored query traces and feedback, clusters eligible
+    outcomes, and returns the gap map with topics and recommendations.
+    On generation failure returns ``knowledge_gap_generation_failed`` (R11.5).
+    """
+    from rag_system.knowledge_gap import (
+        KnowledgeGapGenerationError,
+        generate_knowledge_gap_map,
+        select_eligible_outcomes,
+    )
+
+    service = get_service()
+    store = service.artifact_store
+
+    # Gather all query traces from storage.
+    traces: list[QueryTraceRecord] = []
+    for key in store.list_query_trace_keys():
+        payload = store.get_json(key)
+        if payload is not None:
+            traces.append(QueryTraceRecord.model_validate(payload))
+
+    # Gather all feedback records.
+    feedback_items: list[FeedbackReviewRecord] = []
+    for key in store.list_feedback_record_keys():
+        payload = store.get_json(key)
+        if payload is not None:
+            feedback_items.append(FeedbackReviewRecord.model_validate(payload))
+
+    # Select eligible outcomes.
+    outcomes = select_eligible_outcomes(
+        traces,
+        feedback_items,
+        confidence_threshold=settings.route_min_confidence,
+    )
+
+    # Generate the gap map.
+    try:
+        gap_map = generate_knowledge_gap_map(
+            outcomes,
+            embed_question=_get_embed_question(),
+            label_cluster=_get_label_cluster(),
+            max_topics=settings.knowledge_gap_max_topics,
+            min_eligible_outcomes=settings.knowledge_gap_min_eligible_outcomes,
+        )
+    except KnowledgeGapGenerationError:
+        raise HTTPException(
+            status_code=500,
+            detail="knowledge_gap_generation_failed",
+        )
+
+    return gap_map
+
+
+def _get_embed_question():
+    """Return the embedding function for knowledge-gap clustering."""
+    service = get_service()
+    return lambda question: service.embedder.embed_query(question)
+
+
+def _get_label_cluster():
+    """Return the cluster labeling function for knowledge-gap topic labels."""
+    from rag_system.llm import build_text_llm
+
+    settings = get_settings()
+    # Use gemini-3.5-flash for cluster labeling, overriding the default model.
+    label_settings = settings.model_copy(
+        update={
+            "gemini_model_id": "gemini-3.5-flash",
+            "gemini_read_timeout_s": 30,
+        }
+    )
+    llm = build_text_llm(label_settings)
+
+    def label(questions: list[str]) -> str:
+        prompt = (
+            "Summarize the following questions into a single short topic label "
+            "(max 5 words):\n" + "\n".join(f"- {q}" for q in questions)
+        )
+        return llm(prompt)
+
+    return label

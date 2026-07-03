@@ -30,6 +30,33 @@
   overflow-wrap: anywhere;
 }
 
+/* "Interpreted as …" note explaining how a follow-up was rewritten. */
+.rewritten {
+  align-self: flex-end;
+  max-width: 80%;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  padding: 6px 10px;
+  background: var(--accent-soft);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.rewrittenLabel {
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.rewrittenText {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
 .loading {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);

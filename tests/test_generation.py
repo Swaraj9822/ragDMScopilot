@@ -1,5 +1,13 @@
+from rag_system.claims import ClaimMappingResult
 from rag_system.generation import GroundedAnswerGenerator, build_grounded_prompt
 from rag_system.models import Chunk, RetrievalHit
+
+
+class _NoOpClaimMapper:
+    """Claim mapper that returns no claims (used to keep existing tests working)."""
+
+    def map_claims(self, answer_text, hits, trace_id):
+        return ClaimMappingResult(claims=[], decomposition_failed=False, conflicting_claim_ids=set())
 
 
 def test_prompt_requires_grounding() -> None:
@@ -112,6 +120,7 @@ def _generator_with_response(raw_text: str) -> GroundedAnswerGenerator:
     generator = object.__new__(GroundedAnswerGenerator)
     generator._model_id = "fake-generator"
     generator._call_llm = lambda prompt: (raw_text.strip(), {"inputTokens": 1})
+    generator._claim_mapper = _NoOpClaimMapper()
     return generator
 
 
@@ -127,6 +136,7 @@ def _stream_generator(pieces: list[str]) -> GroundedAnswerGenerator:
     generator = object.__new__(GroundedAnswerGenerator)
     generator._model_id = "fake-generator"
     generator._llm = _FakeStreamLLM(pieces)
+    generator._claim_mapper = _NoOpClaimMapper()
     return generator
 
 

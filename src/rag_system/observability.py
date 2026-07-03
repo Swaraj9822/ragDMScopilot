@@ -16,6 +16,7 @@ from typing import Any, Generator
 from tenacity import (
     before_sleep_log,
     retry,
+    retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
@@ -396,11 +397,20 @@ def retry_on_transient(
     max_retries: int = _MAX_RETRIES,
     min_wait: float = _MIN_WAIT_S,
     max_wait: float = _MAX_WAIT_S,
+    exclude: type[BaseException] | tuple[type[BaseException], ...] = (),
 ):
-    """Tenacity retry with exponential back-off.  Logs each retry at WARNING."""
-    return retry(
-        stop=stop_after_attempt(max_retries),
-        wait=wait_exponential(multiplier=1, min=min_wait, max=max_wait),
-        before_sleep=before_sleep_log(_retry_logger, logging.WARNING),
-        reraise=True,
-    )
+    """Tenacity retry with exponential back-off.  Logs each retry at WARNING.
+
+    ``exclude`` names exception type(s) that are deterministic and must NOT be
+    retried (e.g. a failed conditional-write precondition). They propagate
+    immediately instead of burning the back-off budget.
+    """
+    retry_kwargs: dict[str, Any] = {
+        "stop": stop_after_attempt(max_retries),
+        "wait": wait_exponential(multiplier=1, min=min_wait, max=max_wait),
+        "before_sleep": before_sleep_log(_retry_logger, logging.WARNING),
+        "reraise": True,
+    }
+    if exclude:
+        retry_kwargs["retry"] = retry_if_not_exception_type(exclude)
+    return retry(**retry_kwargs)

@@ -10,11 +10,17 @@ from typing import Any, Iterator
 
 from rag_system.chunking import DocumentChunker
 from rag_system.config import Settings
-from rag_system.embedding import BedrockTitanEmbedder
+from rag_system.embedding import GeminiEmbedder
 from rag_system.generation import GroundedAnswerGenerator
 from rag_system.models import (
+    BenchmarkCase,
+    DocumentHistory,
     DocumentRecord,
     DocumentStatus,
+    DocumentVersion,
+    DocumentVersionIndex,
+    FeedbackReviewRecord,
+    IngestionEvent,
     QueryFeedbackRecord,
     QueryFeedbackRequest,
     QueryRequest,
@@ -32,19 +38,31 @@ from rag_system.observability import (
 )
 from rag_system.observability_tracing import get_active_trace_id, record_query_summary
 from rag_system.parsing import DocumentParserRouter
-from rag_system.queue import IngestionJob, SqsIngestionQueue
+from rag_system.queue import IngestionJob, PubSubIngestionQueue
 from rag_system.rerank import BedrockCohereReranker
 from rag_system.retrieval import PineconeHybridIndex
 from rag_system.sparse import BM25SparseEncoder
 from rag_system.storage import (
     PreconditionFailed,
-    S3ArtifactStore,
+    GcsArtifactStore,
     chunks_key,
     document_record_key,
+    document_version_index_key,
+    document_version_key,
     embedding_manifest_key,
+    evaluation_run_results_key,
+    evaluation_set_case_key,
+    ingestion_event_key,
     parsed_key,
     query_feedback_key,
     query_trace_key,
+)
+from rag_system.feedback import (
+    AlreadyInEvaluationSetError,
+    classify_feedback_record,
+    parse_failure_category,
+    promote_feedback_record,
+    resolve_feedback_record,
 )
 
 logger = get_logger(__name__)
@@ -70,6 +88,22 @@ class DocumentDeletedError(RuntimeError):
             f"Document {document_id} was deleted; refusing to resurrect it"
         )
         self.document_id = document_id
+
+
+class DocumentVersionNotFoundError(RuntimeError):
+    """Raised when a restore targets a version the Document does not have.
+
+    Signals R5.10: the requested ``Document_Version`` does not exist for the
+    Document, so the caller must leave the ``Active_Version`` unchanged and
+    surface a ``version_not_found`` error to the operator.
+    """
+
+    def __init__(self, document_id: str, version: str) -> None:
+        super().__init__(
+            f"Document {document_id} has no version {version} to restore"
+        )
+        self.document_id = document_id
+        self.version = version
 
 
 class StaleIngestionError(RuntimeError):
@@ -113,11 +147,11 @@ _TRACE_PERSIST_EXECUTOR = ThreadPoolExecutor(
 class RagService:
     def __init__(self, settings: Settings):
         self._settings = settings
-        self._store = S3ArtifactStore(settings)
-        self._queue = SqsIngestionQueue(settings)
+        self._store = GcsArtifactStore(settings)
+        self._queue = PubSubIngestionQueue(settings)
         self._parser: DocumentParserRouter | None = None
         self._chunker: DocumentChunker | None = None
-        self._embedder: BedrockTitanEmbedder | None = None
+        self._embedder: GeminiEmbedder | None = None
         self._sparse_encoder: BM25SparseEncoder | None = None
         self._index: PineconeHybridIndex | None = None
         self._reranker: BedrockCohereReranker | None = None
@@ -131,8 +165,13 @@ class RagService:
         )
 
     @property
-    def queue(self) -> SqsIngestionQueue:
+    def queue(self) -> PubSubIngestionQueue:
         return self._queue
+
+    @property
+    def artifact_store(self) -> GcsArtifactStore:
+        """The shared GCS artifact store (documents, traces, conversations)."""
+        return self._store
 
     @property
     def parser(self) -> DocumentParserRouter:
@@ -147,9 +186,9 @@ class RagService:
         return self._chunker
 
     @property
-    def embedder(self) -> BedrockTitanEmbedder:
+    def embedder(self) -> GeminiEmbedder:
         if self._embedder is None:
-            self._embedder = BedrockTitanEmbedder(self._settings)
+            self._embedder = GeminiEmbedder(self._settings)
         return self._embedder
 
     @property
@@ -398,11 +437,11 @@ class RagService:
                     "document_id": document_id,
                     "version": version,
                     "chunk_count": len(chunks),
-                    "embedding_model": self._settings.bedrock_embedding_model_id,
+                    "embedding_model": self._settings.embedding_model_id,
                     "sparse_model": "bm25-msmarco-default" if self._settings.sparse_enabled else None,
                     "pinecone_index": self._settings.pinecone_index_name,
                     "chunks_uri": (
-                        f"s3://{self._settings.s3_bucket}/"
+                        f"gs://{self._settings.gcs_bucket}/"
                         f"{chunks_key(document_id, version)}"
                     ),
                 },
@@ -422,6 +461,15 @@ class RagService:
             # version's vectors and any partials from earlier attempts.
             await asyncio.to_thread(self._save_document_record, final)
             logger.info("Ingestion complete for %s", filename, extra=log_extra)
+            # R5.1/R5.2/R5.4/R5.5: formalize the successful ingestion into
+            # first-class version control artifacts — create the immutable
+            # Document_Version manifest, record a succeeded Ingestion_Event, and
+            # publish the version as active through the version-index CAS write
+            # (which enforces at-most-one active version). Source content of
+            # every version is retained (never deleted), satisfying R5.5.
+            await asyncio.to_thread(
+                self._record_ingestion_success, document_id, version, log_extra
+            )
             self._cleanup_superseded_vectors(document_id, version, log_extra)
             return final
         except DocumentDeletedError:
@@ -464,6 +512,18 @@ class RagService:
                 # newer version owns the record, so don't overwrite it with this
                 # stale failure.
                 return self._abort_ingestion_for_superseded(document_id, log_extra)
+            # R5.3: a failed ingestion creates NO new Document_Version and leaves
+            # the current Active_Version untouched (neither the manifest nor the
+            # version-index active pointer is written here), but it MUST record a
+            # failed Ingestion_Event so the failure appears in the document's
+            # ingestion history.
+            await asyncio.to_thread(
+                self._record_ingestion_failure,
+                document_id,
+                version,
+                str(exc),
+                log_extra,
+            )
             # Remove this failed version's partial vectors so they can never be
             # published; the previously published version (a different version)
             # is untouched and stays searchable.
@@ -560,6 +620,343 @@ class RagService:
                 extra=log_extra,
                 exc_info=True,
             )
+
+    # --- Document version control (R5.1-R5.5) -------------------------------
+
+    def _record_ingestion_success(
+        self, document_id: str, version: str, log_extra: dict[str, Any]
+    ) -> None:
+        """Persist the version-control artifacts for a successful ingestion.
+
+        Creates the immutable ``Document_Version`` manifest (R5.1), records a
+        succeeded ``Ingestion_Event`` (R5.1), and publishes the version as the
+        document's ``Active_Version`` through a compare-and-set write to the
+        version index (R5.2), which enforces at-most-one active version (R5.4).
+        The source content of every version is retained — no version content is
+        ever deleted — so R5.5 holds. The manifest write is create-only and
+        therefore idempotent: re-ingesting identical content (the same
+        content-hash version) reuses the existing manifest instead of failing.
+        """
+        timestamp = datetime.now(timezone.utc).isoformat()
+        manifest = DocumentVersion(
+            document_id=document_id,
+            version=version,
+            created_at=timestamp,
+            indexed=True,
+            vectors_present=True,
+            source_retained=True,
+        )
+        # 1. Immutable per-version manifest (create-only; idempotent per version).
+        self._create_artifact(
+            document_version_key(document_id, version),
+            manifest.model_dump(mode="json"),
+        )
+        # 2. Succeeded ingestion event (always a distinct history entry).
+        self._record_ingestion_event(document_id, version, "succeeded", timestamp, None)
+        # 3. Publish as active via the version-index CAS write.
+        self._activate_version_in_index(document_id, manifest)
+        logger.info(
+            "Recorded successful Document_Version and Ingestion_Event",
+            extra=log_extra,
+        )
+
+    def _record_ingestion_failure(
+        self,
+        document_id: str,
+        version: str,
+        error: str,
+        log_extra: dict[str, Any],
+    ) -> None:
+        """Record only a failed ``Ingestion_Event`` for a failed ingestion (R5.3).
+
+        No ``Document_Version`` manifest is created and the version index is not
+        touched, so the current ``Active_Version`` is left unchanged.
+        """
+        timestamp = datetime.now(timezone.utc).isoformat()
+        self._record_ingestion_event(document_id, version, "failed", timestamp, error)
+        logger.info(
+            "Recorded failed Ingestion_Event (no version created)",
+            extra=log_extra,
+        )
+
+    def _record_ingestion_event(
+        self,
+        document_id: str,
+        version: str,
+        status: str,
+        timestamp: str,
+        error: str | None,
+    ) -> None:
+        """Persist a single immutable ``Ingestion_Event`` (create-only)."""
+        event = IngestionEvent(
+            ingestion_id=str(uuid.uuid4()),
+            document_id=document_id,
+            version=version,
+            status=status,
+            timestamp=timestamp,
+            error=error,
+        )
+        self._create_artifact(
+            ingestion_event_key(document_id, event.ingestion_id),
+            event.model_dump(mode="json"),
+        )
+
+    def _activate_version_in_index(
+        self, document_id: str, manifest: DocumentVersion
+    ) -> None:
+        """Add ``manifest`` to the version index and mark it active (R5.2/R5.4).
+
+        The index is the ordered list of a document's versions plus a single
+        active pointer. The compare-and-set write guarantees concurrent
+        ingestions cannot both win the active pointer, so at most one active
+        version ever holds (R5.4). Prior version entries are retained (R5.5/R5.11).
+        """
+
+        def mutate(current: object | None) -> object:
+            if isinstance(current, dict):
+                index = DocumentVersionIndex.model_validate(current)
+            else:
+                index = DocumentVersionIndex(document_id=document_id)
+            # Replace any existing entry for this version, then append the fresh
+            # manifest so re-ingestion updates rather than duplicates it.
+            index.versions = [
+                v for v in index.versions if v.version != manifest.version
+            ]
+            # Publishing a new active version triggers cleanup of every other
+            # version's vectors (see _cleanup_superseded_vectors), so record in
+            # the index that the superseded versions no longer hold live vectors.
+            # The restore path reads this flag to decide whether it can flip the
+            # active pointer directly (R5.8) or must re-index from the retained
+            # source first (R5.9). The immutable per-version manifest is left
+            # untouched; the index is the mutable source of truth for liveness.
+            for other in index.versions:
+                other.vectors_present = False
+            index.versions.append(manifest)
+            index.active_version = manifest.version
+            return index.model_dump(mode="json")
+
+        self._cas_update(document_version_index_key(document_id), mutate)
+
+    # --- Document version history & restore (R5.6-R5.11) --------------------
+
+    def _load_version_index(self, document_id: str) -> DocumentVersionIndex | None:
+        """Load a Document's version index, or ``None`` when none exists yet."""
+        if not hasattr(self._store, "get_json"):
+            return None
+        payload = self._store.get_json(document_version_index_key(document_id))
+        if payload is None:
+            return None
+        return DocumentVersionIndex.model_validate(payload)
+
+    def _load_ingestion_events(self, document_id: str) -> list[IngestionEvent]:
+        """Load every retained Ingestion_Event for a Document (unordered)."""
+        if not hasattr(self._store, "list_ingestion_event_keys") or not hasattr(
+            self._store, "get_json"
+        ):
+            return []
+        events: list[IngestionEvent] = []
+        for key in self._store.list_ingestion_event_keys(document_id):
+            payload = self._store.get_json(key)
+            if payload is not None:
+                events.append(IngestionEvent.model_validate(payload))
+        return events
+
+    def get_document_history(self, document_id: str) -> DocumentHistory | None:
+        """Return a Document's versions + ingestion events, newest first (R5.7).
+
+        Returns ``None`` when the Document does not exist or has been deleted so
+        the API layer can surface a 404. Versions are ordered by their creation
+        timestamp and events by their ingestion timestamp, most recent first.
+        """
+        record = self.get_document(document_id)
+        if record is None or record.status == DocumentStatus.deleted:
+            return None
+
+        index = self._load_version_index(document_id)
+        versions = list(index.versions) if index is not None else []
+        active_version = (
+            index.active_version
+            if index is not None
+            else self._published_version_of(record)
+        )
+        events = self._load_ingestion_events(document_id)
+
+        # ISO-8601 UTC timestamps sort lexicographically, so a reverse string
+        # sort yields most-recent-first without parsing.
+        versions.sort(key=lambda v: v.created_at, reverse=True)
+        events.sort(key=lambda e: e.timestamp, reverse=True)
+
+        return DocumentHistory(
+            document_id=document_id,
+            active_version=active_version,
+            versions=versions,
+            events=events,
+        )
+
+    def restore_version(self, document_id: str, version: str) -> DocumentRecord | None:
+        """Restore a previous Document_Version as the Active_Version (R5.8-R5.11).
+
+        Returns ``None`` when the Document does not exist or is deleted. Raises
+        :class:`DocumentVersionNotFoundError` when the target version is unknown
+        for the Document, leaving the Active_Version unchanged (R5.10). When the
+        target version's vectors still exist, the active pointer is flipped
+        directly (R5.8); when they were cleaned up, the version is re-indexed
+        from its retained source content first (R5.9). All prior versions are
+        retained (R5.11), and retrieval uses the newly active version (R5.6).
+        """
+        record = self.get_document(document_id)
+        if record is None or record.status == DocumentStatus.deleted:
+            return None
+
+        index = self._load_version_index(document_id)
+        target = None
+        if index is not None:
+            target = next(
+                (v for v in index.versions if v.version == version), None
+            )
+        if target is None:
+            # R5.10: unknown version — leave the active version untouched.
+            raise DocumentVersionNotFoundError(document_id, version)
+
+        log_extra: dict[str, Any] = {"document_id": document_id, "version": version}
+        if not target.vectors_present:
+            # R5.9: the version's vectors were cleaned up after being superseded;
+            # rebuild them from the retained source content before activating.
+            logger.info(
+                "Restoring version with cleaned-up vectors; re-indexing from "
+                "retained source",
+                extra=log_extra,
+            )
+            self._reindex_version(document_id, version)
+        else:
+            logger.info(
+                "Restoring version with existing vectors; flipping active pointer",
+                extra=log_extra,
+            )
+
+        # Publish the target as active in the version index (R5.8/R5.11): the
+        # target now holds live vectors; every other version is marked as not
+        # holding live vectors, and all version entries are retained.
+        self._activate_existing_version(document_id, version)
+
+        # Point the Document record's active version at the restored version so
+        # the retrieval search-gate serves it (R5.6). The record's own upload
+        # ``version`` is left unchanged (it tracks the latest upload, not the
+        # active pointer), so this write passes the stale-version guard.
+        restored = record.model_copy(
+            update={
+                "active_version": version,
+                "status": DocumentStatus.indexed,
+                "error": None,
+            }
+        )
+        self._save_document_record(restored)
+        metrics.increment("rag_document_versions_restored_total")
+        logger.info("Restored Document_Version as active", extra=log_extra)
+        return restored
+
+    def _activate_existing_version(self, document_id: str, version: str) -> None:
+        """Flip the version index's active pointer to an existing version.
+
+        Marks the target version as holding live vectors and every other version
+        as not, then sets the active pointer to the target. All version entries
+        are retained (R5.11). Uses the same CAS write as ingestion so concurrent
+        publishes cannot corrupt the active pointer.
+        """
+
+        def mutate(current: object | None) -> object:
+            if not isinstance(current, dict):
+                raise DocumentVersionNotFoundError(document_id, version)
+            index = DocumentVersionIndex.model_validate(current)
+            if not any(v.version == version for v in index.versions):
+                raise DocumentVersionNotFoundError(document_id, version)
+            for v in index.versions:
+                v.vectors_present = v.version == version
+            index.active_version = version
+            return index.model_dump(mode="json")
+
+        self._cas_update(document_version_index_key(document_id), mutate)
+
+    def _reindex_version(self, document_id: str, version: str) -> None:
+        """Re-index a Document_Version from its retained content (R5.9).
+
+        Reads the version's retained chunks, re-embeds them (adding sparse
+        vectors when hybrid retrieval is enabled), and upserts them so the
+        version's vectors exist again before it is activated.
+        """
+        if not hasattr(self._store, "get_chunks"):
+            raise RuntimeError(
+                "Store cannot re-index a restored version: retained chunks are "
+                "unavailable"
+            )
+        chunks = self._store.get_chunks(document_id, version)
+        if not chunks:
+            raise RuntimeError(
+                f"No retained content found to re-index version {version} of "
+                f"document {document_id}"
+            )
+        embedded = self.embedder.embed_chunks(chunks)
+        if self._settings.sparse_enabled:
+            sparse_vectors = self.sparse_encoder.encode_documents(
+                [c.text for c in chunks]
+            )
+            for ec, sv in zip(embedded, sparse_vectors, strict=True):
+                ec.sparse_vector = sv
+        self.index.upsert(embedded)
+
+    def _create_artifact(self, key: str, payload: object) -> None:
+        """Create-only write of an immutable artifact.
+
+        Uses the store's create-only primitive when available (real S3 and
+        CAS-capable doubles), degrading to a plain ``put_json`` for the minimal
+        write-only doubles used in some tests. A :class:`PreconditionFailed`
+        (the key already exists) is swallowed so create-only writes are
+        idempotent for content that hashes to an already-recorded version.
+        """
+        try:
+            if hasattr(self._store, "create_json"):
+                self._store.create_json(key, payload)
+            elif hasattr(self._store, "put_json_conditional"):
+                self._store.put_json_conditional(key, payload, if_none_match=True)
+            else:
+                self._store.put_json(key, payload)
+        except PreconditionFailed:
+            # The artifact already exists — create-only writes are immutable, so
+            # treat a second write as a no-op rather than an error.
+            pass
+
+    def _cas_update(self, key: str, mutate: Any) -> None:
+        """Read-modify-write a JSON artifact under optimistic concurrency.
+
+        Prefers the store's native CAS helper, falls back to a manual
+        get-etag/put-conditional loop for doubles exposing those primitives, and
+        finally degrades to a read-then-write for minimal write-only doubles
+        (single-threaded tests that never actually race).
+        """
+        if hasattr(self._store, "update_json_cas"):
+            self._store.update_json_cas(key, mutate)
+            return
+        if hasattr(self._store, "get_json_with_etag") and hasattr(
+            self._store, "put_json_conditional"
+        ):
+            for _ in range(_MAX_RECORD_CAS_ATTEMPTS):
+                current, etag = self._store.get_json_with_etag(key)
+                payload = mutate(current)
+                try:
+                    if current is None:
+                        self._store.put_json_conditional(
+                            key, payload, if_none_match=True
+                        )
+                    else:
+                        self._store.put_json_conditional(key, payload, if_match=etag)
+                    return
+                except PreconditionFailed:
+                    continue
+            raise PreconditionFailed(key)
+        current = (
+            self._store.get_json(key) if hasattr(self._store, "get_json") else None
+        )
+        self._store.put_json(key, mutate(current))
 
     @staticmethod
     def _published_version_of(record: DocumentRecord | None) -> str | None:
@@ -785,6 +1182,318 @@ class RagService:
             extra={"trace_id": trace_id, "feedback_id": record.feedback_id},
         )
         return record
+
+    # ------------------------------------------------------------------
+    # Feedback review inbox actions (R6.5-R6.11)
+    #
+    # Actions are addressed by ``feedback_id`` alone (the API path is
+    # ``/feedback/{id}/...``). Because a feedback record lives under its
+    # trace's prefix, the full storage key is resolved by scanning the feedback
+    # keys, then mutated under ETag-CAS so concurrent operators never clobber
+    # one another's classification/resolution.
+    # ------------------------------------------------------------------
+
+    def _feedback_key_for(self, feedback_id: str) -> str | None:
+        """Resolve the full S3 key for a feedback record by its id, or ``None``."""
+        suffix = f"/feedback/{feedback_id}.json"
+        for key in self._store.list_feedback_record_keys():
+            if key.endswith(suffix):
+                return key
+        return None
+
+    def get_feedback_review_record(
+        self, feedback_id: str
+    ) -> FeedbackReviewRecord | None:
+        """Load a single feedback record as a :class:`FeedbackReviewRecord`.
+
+        A legacy :class:`QueryFeedbackRecord` payload (written before the review
+        fields existed) validates cleanly, defaulting to ``unreviewed`` with no
+        category — so the inbox actions work uniformly across old and new records.
+        """
+        key = self._feedback_key_for(feedback_id)
+        if key is None:
+            return None
+        payload = self._store.get_json(key)
+        if payload is None:
+            return None
+        return FeedbackReviewRecord.model_validate(payload)
+
+    def list_feedback_reviews(self) -> list[FeedbackReviewRecord]:
+        """Load every persisted feedback record as a :class:`FeedbackReviewRecord`.
+
+        Backs the operator-only feedback inbox (``GET /feedback``). Like
+        :meth:`list_documents`, the per-record reads (one JSON blob per key) are
+        fanned out across a bounded thread pool rather than issued serially, so
+        the inbox does not scale linearly in round trips with the feedback
+        volume. Records that fail validation (corrupt/partial writes) are skipped
+        rather than failing the whole listing.
+        """
+        keys = self._store.list_feedback_record_keys()
+        if not keys:
+            return []
+
+        max_workers = max(1, getattr(self._settings, "document_list_max_workers", 16))
+        if max_workers <= 1 or len(keys) == 1:
+            payloads = [self._store.get_json(key) for key in keys]
+        else:
+            payloads = list(
+                self._get_document_list_executor(max_workers).map(
+                    self._store.get_json, keys
+                )
+            )
+
+        records: list[FeedbackReviewRecord] = []
+        for key, payload in zip(keys, payloads):
+            if payload is None:
+                continue
+            try:
+                records.append(FeedbackReviewRecord.model_validate(payload))
+            except Exception:  # noqa: BLE001 - skip a corrupt record, not the page
+                logger.warning("Skipping invalid feedback record at key %s", key)
+        return records
+
+    # ------------------------------------------------------------------
+    # Multi-method evaluation runs (R7)
+    # ------------------------------------------------------------------
+
+    def list_benchmark_cases(self):
+        """Load every Benchmark_Case in the default Evaluation_Set (R7)."""
+        from rag_system.models import BenchmarkCase
+
+        set_id = self._settings.default_evaluation_set_id
+        cases: list[BenchmarkCase] = []
+        for key in self._store.list_evaluation_set_case_keys(set_id):
+            payload = self._store.get_json(key)
+            if payload is None:
+                continue
+            try:
+                cases.append(BenchmarkCase.model_validate(payload))
+            except Exception:  # noqa: BLE001 - skip a corrupt case, not the run
+                logger.warning("Skipping invalid benchmark case at key %s", key)
+        return cases
+
+    def run_evaluation(self):
+        """Execute a deterministic evaluation run over the default set (R7.1–R7.6).
+
+        Runs every Benchmark_Case through the RAG pipeline, scores the
+        deterministic checks (citation presence, required facts, evidence
+        status), and — when a case carries relevance labels — computes retrieval
+        metrics against the query trace's retrieved hits (R7.2, R7.9). The CI
+        pass/fail is decided solely by the deterministic checks (R7.5, R7.6);
+        LLM-judge scoring is a separate scheduled report and is not part of this
+        run. The run is persisted create-only and returned.
+
+        Raises :class:`~rag_system.evaluation.EvaluationSetValidationError` when
+        the set has no human-reviewed case (R7.4).
+        """
+        from rag_system.evaluation import (
+            ci_run_passed,
+            evaluate_benchmark_case,
+            validate_evaluation_set,
+        )
+        from rag_system.models import (
+            EvaluationRunDetail,
+            QueryRequest,
+        )
+        from rag_system.retrieval_metrics import compute_retrieval_metrics
+
+        cases = self.list_benchmark_cases()
+        validate_evaluation_set(cases)  # R7.4 — raises when no human-reviewed case
+
+        depth = getattr(self._settings, "retrieval_metric_depth_k", 10)
+        results = []
+        for case in cases:
+            response = self.query(
+                QueryRequest(question=case.question, document_ids=case.document_ids)
+            )
+            result = evaluate_benchmark_case(case, response)
+            # R7.2 — retrieval metrics only when the case carries relevance
+            # labels and the trace's retrieved hits are available.
+            if case.relevance_labels is not None:
+                trace = self.get_query_trace(response.trace_id)
+                if trace is not None:
+                    result = result.model_copy(
+                        update={
+                            "retrieval_metrics": compute_retrieval_metrics(
+                                trace.retrieved_hits, case.relevance_labels, depth
+                            )
+                        }
+                    )
+            results.append(result)
+
+        run_id = str(uuid.uuid4())
+        detail = EvaluationRunDetail(
+            run_id=run_id,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            ci_passed=ci_run_passed(results),
+            results=results,
+        )
+        self._store.create_json(
+            evaluation_run_results_key(run_id), detail.model_dump(mode="json")
+        )
+        logger.info(
+            "Recorded evaluation run",
+            extra={
+                "run_id": run_id,
+                "case_count": len(results),
+                "ci_passed": detail.ci_passed,
+            },
+        )
+        metrics.increment(
+            "rag_evaluation_runs_total",
+            {"ci_passed": str(detail.ci_passed).lower()},
+        )
+        return detail
+
+    def list_evaluation_runs(self):
+        """Return summaries of all persisted evaluation runs, newest first (R7.7)."""
+        from rag_system.models import EvaluationRunDetail, EvaluationRunSummary
+
+        summaries: list[EvaluationRunSummary] = []
+        for key in self._store.list_evaluation_run_keys():
+            payload = self._store.get_json(key)
+            if payload is None:
+                continue
+            try:
+                detail = EvaluationRunDetail.model_validate(payload)
+            except Exception:  # noqa: BLE001 - skip a corrupt run, not the listing
+                logger.warning("Skipping invalid evaluation run at key %s", key)
+                continue
+            summaries.append(
+                EvaluationRunSummary(
+                    run_id=detail.run_id,
+                    created_at=detail.created_at,
+                    ci_passed=detail.ci_passed,
+                    result_count=len(detail.results),
+                )
+            )
+        summaries.sort(key=lambda s: s.created_at, reverse=True)
+        return summaries
+
+    def get_evaluation_run(self, run_id: str):
+        """Return the full detail of a persisted evaluation run, or ``None`` (R7.7)."""
+        from rag_system.models import EvaluationRunDetail
+
+        payload = self._store.get_json(evaluation_run_results_key(run_id))
+        if payload is None:
+            return None
+        return EvaluationRunDetail.model_validate(payload)
+
+
+    def classify_feedback(
+        self, feedback_id: str, category: str, reviewer: str
+    ) -> FeedbackReviewRecord | None:
+        """Classify a Feedback_Item with a Failure_Category (R6.5, R6.10).
+
+        Returns ``None`` when no such feedback exists. Raises
+        :class:`~rag_system.feedback.InvalidFailureCategoryError` for an
+        out-of-vocabulary category, leaving the stored record untouched.
+        """
+        key = self._feedback_key_for(feedback_id)
+        if key is None:
+            return None
+
+        # Validate up front so an invalid category never triggers a storage
+        # write (R6.10: stored category left unchanged).
+        parse_failure_category(category)
+        reviewed_at = datetime.now(timezone.utc).isoformat()
+        holder: dict[str, FeedbackReviewRecord] = {}
+
+        def mutate(current: object | None) -> object:
+            record = FeedbackReviewRecord.model_validate(current)
+            updated = classify_feedback_record(
+                record,
+                category=category,
+                reviewer=reviewer,
+                reviewed_at=reviewed_at,
+            )
+            holder["record"] = updated
+            return updated.model_dump(mode="json")
+
+        self._cas_update(key, mutate)
+        logger.info(
+            "Classified feedback",
+            extra={"feedback_id": feedback_id, "category": str(category)},
+        )
+        return holder["record"]
+
+    def resolve_feedback(self, feedback_id: str) -> FeedbackReviewRecord | None:
+        """Mark a Feedback_Item as resolved, keeping it in the inbox (R6.8)."""
+        key = self._feedback_key_for(feedback_id)
+        if key is None:
+            return None
+
+        holder: dict[str, FeedbackReviewRecord] = {}
+
+        def mutate(current: object | None) -> object:
+            record = FeedbackReviewRecord.model_validate(current)
+            updated = resolve_feedback_record(record)
+            holder["record"] = updated
+            return updated.model_dump(mode="json")
+
+        self._cas_update(key, mutate)
+        logger.info("Resolved feedback", extra={"feedback_id": feedback_id})
+        return holder["record"]
+
+    def promote_feedback(self, feedback_id: str) -> BenchmarkCase | None:
+        """Promote a reviewed Feedback_Item into the Evaluation_Set (R6.6-R6.11).
+
+        Returns ``None`` when no such feedback exists. Raises
+        :class:`~rag_system.feedback.ExpectedAnswerRequiredError` (R6.7) or
+        :class:`~rag_system.feedback.AlreadyInEvaluationSetError` (R6.11) when the
+        promotion is not permitted; in neither case is a Benchmark_Case created.
+        """
+        key = self._feedback_key_for(feedback_id)
+        if key is None:
+            return None
+
+        record = self.get_feedback_review_record(feedback_id)
+        if record is None:
+            return None
+
+        # The question is read from the joined trace (empty when the trace has
+        # expired). Guards (already-promoted / expected-answer-required) run
+        # inside promote_feedback_record.
+        trace = self.get_query_trace(record.trace_id)
+        question = trace.question if trace is not None else ""
+        _, case = promote_feedback_record(record, question=question)
+
+        set_id = self._settings.default_evaluation_set_id
+        case_key = evaluation_set_case_key(set_id, case.id)
+
+        # Create the Benchmark_Case immutably. A concurrent double-promote loses
+        # the create-only race and is reported as already-in-set (R6.11).
+        try:
+            if hasattr(self._store, "create_json"):
+                self._store.create_json(case_key, case.model_dump(mode="json"))
+            elif hasattr(self._store, "put_json_conditional"):
+                self._store.put_json_conditional(
+                    case_key, case.model_dump(mode="json"), if_none_match=True
+                )
+            else:  # minimal write-only doubles
+                self._store.put_json(case_key, case.model_dump(mode="json"))
+        except PreconditionFailed as exc:
+            raise AlreadyInEvaluationSetError(
+                "Feedback_Item is already present in the Evaluation_Set."
+            ) from exc
+
+        # Record the de-dup pointer on the feedback record under CAS, re-checking
+        # the guard against a racing writer.
+        def mutate(current: object | None) -> object:
+            current_record = FeedbackReviewRecord.model_validate(current)
+            updated, _ = promote_feedback_record(current_record, question=question)
+            return updated.model_dump(mode="json")
+
+        self._cas_update(key, mutate)
+        logger.info(
+            "Promoted feedback to evaluation set",
+            extra={
+                "feedback_id": feedback_id,
+                "case_id": case.id,
+                "evaluation_set_id": set_id,
+            },
+        )
+        return case
 
     def _active_version_for(self, document_id: str) -> str | None:
         """Look up a document's published version for the search gate.
@@ -1152,7 +1861,7 @@ class RagService:
 
     def _query_model_ids(self) -> dict[str, str]:
         model_ids = {
-            "embedding": getattr(self._settings, "bedrock_embedding_model_id", None),
+            "embedding": getattr(self._settings, "embedding_model_id", None),
             "generation": getattr(self._settings, "active_llm_model_id", None),
             "pinecone_index": getattr(self._settings, "pinecone_index_name", None),
         }

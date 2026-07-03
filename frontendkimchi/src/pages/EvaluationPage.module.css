@@ -1,0 +1,249 @@
+/* EvaluationPage — Multi-method evaluation dashboard (R7.7) */
+
+.layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+/* ── Run selector ── */
+
+.runSelector {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.runSelector label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.runSelector select {
+  height: 36px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  background: var(--bg-default);
+  color: var(--text-primary);
+  min-width: 240px;
+}
+
+.runSelector select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+/* ── CI Status Banner ── */
+
+.ciBanner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ciPassed {
+  background: var(--success-soft, #dcfce7);
+  color: var(--success, #16a34a);
+  border: 1px solid var(--success, #16a34a);
+}
+
+.ciFailed {
+  background: var(--danger-soft, #fef2f2);
+  color: var(--danger, #dc2626);
+  border: 1px solid var(--danger, #dc2626);
+}
+
+/* ── Method sections ── */
+
+.methodSection {
+  padding: var(--space-5);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+}
+
+.methodTitle {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* ── Results table ── */
+
+.resultsTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.resultsTable th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-default);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.resultsTable td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-default);
+  vertical-align: top;
+}
+
+.resultsTable tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* ── Check indicators ── */
+
+.checkList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.checkBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.checkPass {
+  background: var(--success-soft, #dcfce7);
+  color: var(--success, #16a34a);
+}
+
+.checkFail {
+  background: var(--danger-soft, #fef2f2);
+  color: var(--danger, #dc2626);
+}
+
+/* ── Metric values ── */
+
+.metricValue {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.scoreBar {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.scoreBarTrack {
+  width: 60px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-subtle);
+  overflow: hidden;
+}
+
+.scoreBarFill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.2s;
+}
+
+.errorIndication {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--warning, #d97706);
+  font-weight: 500;
+}
+
+/* ── Empty / no data hints ── */
+
+.noDataHint {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: var(--space-3) 0;
+  font-style: italic;
+}
+
+/* ── Responsive ── */
+
+@media (max-width: 768px) {
+  .runSelector {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .runSelector select {
+    width: 100%;
+    min-width: unset;
+  }
+
+  .resultsTable {
+    font-size: 12px;
+  }
+
+  .resultsTable th,
+  .resultsTable td {
+    padding: var(--space-1) var(--space-2);
+  }
+}
+
+/* ── Run evaluation action ── */
+
+.runAction {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.runError {
+  font-size: 13px;
+  color: var(--danger, #dc2626);
+  max-width: 320px;
+}
+
+.runButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 36px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 200ms ease, opacity 200ms ease;
+}
+
+.runButton:hover:not(:disabled) {
+  background: var(--accent-strong, var(--accent));
+}
+
+.runButton:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.runButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

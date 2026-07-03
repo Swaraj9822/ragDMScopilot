@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Files, X } from "lucide-react";
+import { Eraser, Files, MessageSquarePlus, X } from "lucide-react";
 import { shortenId } from "../../lib/format";
 import styles from "./ContextRail.module.css";
 
@@ -7,14 +7,20 @@ interface ContextRailProps {
   selectedIds: string[];
   onRemove: (id: string) => void;
   historyCount: number;
-  onNewSession: () => void;
+  conversationId: string | null;
+  onNewTopic: () => void;
+  onForgetContext: () => void;
+  busy?: boolean;
 }
 
 export function ContextRail({
   selectedIds,
   onRemove,
   historyCount,
-  onNewSession,
+  conversationId,
+  onNewTopic,
+  onForgetContext,
+  busy = false,
 }: ContextRailProps) {
   return (
     <aside className={styles.rail} aria-label="Query context">
@@ -47,20 +53,40 @@ export function ContextRail({
       </section>
 
       <section className={styles.block}>
-        <h2 className={styles.heading}>Local history</h2>
+        <h2 className={styles.heading}>Conversation</h2>
         <p className={styles.empty}>
-          {historyCount === 0
-            ? "Questions in this browser session appear here. The backend does not store conversation history."
-            : `${historyCount} question${historyCount === 1 ? "" : "s"} saved in this browser.`}
+          {conversationId
+            ? "The copilot remembers this thread, so follow-ups can build on earlier questions."
+            : "Ask a question to start a conversation. Follow-ups will build on it automatically."}
         </p>
-        <button
-          type="button"
-          className="btn btn-sm"
-          onClick={onNewSession}
-          disabled={historyCount === 0 && selectedIds.length === 0}
-        >
-          New session
-        </button>
+        {conversationId && (
+          <p className={styles.convoId}>
+            <span className={styles.convoLabel}>Thread</span>
+            <span className="mono">{shortenId(conversationId)}</span>
+          </p>
+        )}
+        <div className={styles.actions}>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={onForgetContext}
+            disabled={busy || !conversationId}
+            title="Keep this thread but stop follow-ups from referencing earlier turns"
+          >
+            <Eraser size={14} aria-hidden="true" />
+            Forget context
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={onNewTopic}
+            disabled={busy || (historyCount === 0 && selectedIds.length === 0 && !conversationId)}
+            title="Start a brand-new conversation"
+          >
+            <MessageSquarePlus size={14} aria-hidden="true" />
+            Start new topic
+          </button>
+        </div>
       </section>
     </aside>
   );

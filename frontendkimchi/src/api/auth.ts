@@ -20,6 +20,12 @@ export interface UserPublic {
   email: string;
   is_active: boolean;
   created_at: string;
+  /**
+   * Whether the user is an Operator, used to gate operator-only navigation.
+   * Backend defaults this to false and always copies it onto the public shape,
+   * so it is present on every response.
+   */
+  is_operator: boolean;
 }
 
 /** Create a new account. Does not log the user in (no tokens are issued). */

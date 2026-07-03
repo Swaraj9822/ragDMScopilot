@@ -25,6 +25,49 @@
   gap: var(--space-3);
 }
 
+.corpusLoading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-6) 0;
+  justify-content: center;
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.corpusError {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--danger);
+  margin-top: var(--space-3);
+}
+
+.corpusError button {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.loadMoreBtn {
+  align-self: center;
+  margin-top: var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 @media (max-width: 900px) {
   .layout {
     grid-template-columns: 1fr;

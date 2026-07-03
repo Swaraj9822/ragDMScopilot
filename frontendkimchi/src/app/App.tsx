@@ -18,6 +18,18 @@ const ObservabilityPage = isTest
 const DocumentsPage = isTest
   ? (await import("../pages/DocumentsPage")).default
   : lazy(() => import("../pages/DocumentsPage"));
+const EvaluationPage = isTest
+  ? (await import("../pages/EvaluationPage")).default
+  : lazy(() => import("../pages/EvaluationPage"));
+const FeedbackInboxPage = isTest
+  ? (await import("../pages/FeedbackInboxPage")).default
+  : lazy(() => import("../pages/FeedbackInboxPage"));
+const ReplayLabPage = isTest
+  ? (await import("../pages/ReplayLabPage")).default
+  : lazy(() => import("../pages/ReplayLabPage"));
+const KnowledgeGapMapPage = isTest
+  ? (await import("../pages/KnowledgeGapMapPage")).default
+  : lazy(() => import("../pages/KnowledgeGapMapPage"));
 
 export function App() {
   const { status } = useAuth();
@@ -60,6 +72,10 @@ export function App() {
           <Route path="/copilot" element={<CopilotPage />} />
           <Route path="/observability" element={<ObservabilityPage />} />
           <Route path="/documents" element={<DocumentsPage />} />
+          <Route path="/evaluation" element={<EvaluationPage />} />
+          <Route path="/feedback" element={<FeedbackInboxPage />} />
+          <Route path="/replay" element={<ReplayLabPage />} />
+          <Route path="/knowledge-gap" element={<KnowledgeGapMapPage />} />
           <Route path="*" element={<Navigate to="/copilot" replace />} />
         </Routes>
       </Suspense>

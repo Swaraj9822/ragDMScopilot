@@ -14,7 +14,7 @@ import threading
 import time
 from types import SimpleNamespace
 
-from rag_system.embedding import BedrockTitanEmbedder
+from rag_system.embedding import GeminiEmbedder
 from rag_system.models import Chunk, DocumentRecord, DocumentStatus, EmbeddedChunk
 from rag_system.retrieval import PineconeHybridIndex
 from rag_system.service import RagService
@@ -26,10 +26,10 @@ from rag_system.storage import document_record_key
 # ---------------------------------------------------------------------------
 
 
-def _embedder(max_workers: int) -> BedrockTitanEmbedder:
-    embedder = object.__new__(BedrockTitanEmbedder)
+def _embedder(max_workers: int) -> GeminiEmbedder:
+    embedder = object.__new__(GeminiEmbedder)
     embedder._client = None
-    embedder._model_id = "titan-test"
+    embedder._model_id = "gemini-embedding-test"
     embedder._dimension = 3
     embedder._max_workers = max_workers
     return embedder

@@ -1,7 +1,7 @@
 [project]
 name = "production-rag"
 version = "0.1.0"
-description = "Production RAG scaffold using LlamaParse, Pinecone, Gemini, and S3."
+description = "Production RAG scaffold using LlamaParse, Pinecone, Gemini, and GCS."
 requires-python = ">=3.11"
 dependencies = [
   "bcrypt>=4.1.0",
@@ -9,6 +9,8 @@ dependencies = [
   "boto3>=1.34.0",
   "fastapi>=0.111.0",
   "google-genai>=1.0.0",
+  "google-cloud-storage>=2.16.0",
+  "google-cloud-pubsub>=2.21.0",
   "llama-cloud-services>=0.6.0",
   "llama-index-core>=0.12.0",
   "openpyxl>=3.1.0",

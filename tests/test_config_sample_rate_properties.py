@@ -31,8 +31,7 @@ from rag_system.config import Settings
 # ---------------------------------------------------------------------------
 
 _REQUIRED_BY_ALIAS = {
-    "RAG_S3_BUCKET": "test-bucket",
-    "RAG_INGESTION_QUEUE_URL": "https://sqs.example/queue",
+    "RAG_GCS_BUCKET": "test-bucket",
     "LLAMA_CLOUD_API_KEY": "test-llama-key",
     "PINECONE_API_KEY": "test-pinecone-key",
     "PINECONE_INDEX_NAME": "test-index",

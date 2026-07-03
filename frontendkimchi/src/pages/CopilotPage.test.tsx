@@ -21,6 +21,10 @@ function baseResponse(overrides: Partial<UnifiedQueryResponse> = {}): UnifiedQue
     rows: [{ total: 1200 }],
     data_sources: [{ table: "sales", columns: ["total"] }],
     routing_reasoning: "Question is about structured business data.",
+    conversation_id: null,
+    rewritten_question: null,
+    claims: [],
+    claim_decomposition_failed: false,
     ...overrides,
   };
 }
@@ -109,6 +113,55 @@ describe("CopilotPage", () => {
     expect(await screen.findByText("Hybrid")).toBeInTheDocument();
   });
 
+  it("renders an answer delivered via the real terminal event (kind=answer)", async () => {
+    // The backend held-answer contract emits `event: terminal` with a `kind`
+    // discriminator and the response under `payload` — not `event: final`.
+    server.use(
+      http.post(`${API}/ask/stream`, () =>
+        sseResponse([
+          { event: "status", data: { stage: "generate" } },
+          {
+            event: "terminal",
+            data: { kind: "answer", payload: baseResponse(), trace_id: "a".repeat(32) },
+          },
+        ]),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<CopilotPage />, { route: "/copilot" });
+    await user.type(screen.getByLabelText(/ask about your documents/i), "sales?");
+    await user.click(screen.getByRole("button", { name: /send question/i }));
+    expect(await screen.findByText(/total sales were/i)).toBeInTheDocument();
+  });
+
+  it("surfaces a terminal abstention (kind=abstention) as a notice", async () => {
+    server.use(
+      http.post(`${API}/ask/stream`, () =>
+        sseResponse([
+          { event: "status", data: { stage: "verify" } },
+          {
+            event: "terminal",
+            data: {
+              kind: "abstention",
+              payload: {
+                reason_code: "no_evidence",
+                missing_information: "Not enough evidence to answer.",
+                trace_id: "c".repeat(32),
+              },
+            },
+          },
+        ]),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<CopilotPage />, { route: "/copilot" });
+    await user.type(screen.getByLabelText(/ask about your documents/i), "obscure?");
+    await user.click(screen.getByRole("button", { name: /send question/i }));
+    expect(
+      await screen.findByText(/Not enough evidence to answer\./i),
+    ).toBeInTheDocument();
+  });
+
   it("surfaces a server-sent error event mid-stream", async () => {
     server.use(
       http.post(`${API}/ask/stream`, () =>
@@ -128,7 +181,7 @@ describe("CopilotPage", () => {
     expect(screen.getByText("bad question")).toBeInTheDocument();
   });
 
-  it("clears the selected documents via New session so later requests are unconstrained", async () => {
+  it("clears the selected documents via Start new topic so later requests are unconstrained", async () => {
     localStorage.setItem(
       LOCALSTORAGE_KEYS.selectedDocuments,
       JSON.stringify({ v: 1, ids: ["doc-123"] }),
@@ -150,9 +203,9 @@ describe("CopilotPage", () => {
       screen.getByRole("button", { name: /remove document doc-123/i }),
     ).toBeInTheDocument();
 
-    // Start a new session and confirm — this clears the selection too.
-    await user.click(screen.getByRole("button", { name: /new session/i }));
-    await user.click(screen.getByRole("button", { name: /clear session/i }));
+    // Start a new topic and confirm — this clears the selection too.
+    await user.click(screen.getByRole("button", { name: /start new topic/i }));
+    await user.click(screen.getByRole("button", { name: /start over/i }));
 
     expect(
       screen.queryByRole("button", { name: /remove document doc-123/i }),
@@ -201,5 +254,91 @@ describe("CopilotPage", () => {
     expect(await screen.findByText(/question is too vague/i)).toBeInTheDocument();
     // The submitted question stays visible in the conversation.
     expect(screen.getByText("bad question")).toBeInTheDocument();
+  });
+
+  it("continues the same conversation: no id on the first turn, then the minted id", async () => {
+    const conversationId = "c".repeat(32);
+    const captured: Array<{ conversation_id: string | null }> = [];
+    server.use(
+      http.post(`${API}/ask/stream`, async ({ request }) => {
+        captured.push((await request.json()) as { conversation_id: string | null });
+        return streamHandler(baseResponse({ conversation_id: conversationId }));
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<CopilotPage />, { route: "/copilot" });
+
+    const textarea = screen.getByLabelText(/ask about your documents/i);
+    await user.type(textarea, "What was revenue?");
+    await user.click(screen.getByRole("button", { name: /send question/i }));
+
+    // Wait for the first answer to land before asking the follow-up.
+    await screen.findByText(/total sales were/i);
+
+    await user.type(textarea, "What about last quarter?");
+    await user.click(screen.getByRole("button", { name: /send question/i }));
+
+    await waitFor(() => expect(captured).toHaveLength(2));
+    // First turn starts a new conversation; the follow-up continues the minted one.
+    expect(captured[0].conversation_id).toBeNull();
+    expect(captured[1].conversation_id).toBe(conversationId);
+  });
+
+  it("shows the rewritten standalone query for a follow-up", async () => {
+    server.use(
+      http.post(`${API}/ask/stream`, () =>
+        streamHandler(
+          baseResponse({
+            answer: "Revenue last quarter was **$900**.",
+            conversation_id: "d".repeat(32),
+            rewritten_question: "What was revenue last quarter?",
+          }),
+        ),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<CopilotPage />, { route: "/copilot" });
+    await user.type(screen.getByLabelText(/ask about your documents/i), "What about last quarter?");
+    await user.click(screen.getByRole("button", { name: /send question/i }));
+
+    expect(await screen.findByText("What was revenue last quarter?")).toBeInTheDocument();
+    expect(screen.getByText(/interpreted as/i)).toBeInTheDocument();
+  });
+
+  it("forgets context via the context rail, clearing the visible thread", async () => {
+    const conversationId = "e".repeat(32);
+    let forgetCalled = false;
+    server.use(
+      http.post(`${API}/ask/stream`, () =>
+        streamHandler(baseResponse({ answer: "First answer.", conversation_id: conversationId })),
+      ),
+      http.post(`${API}/conversations/${conversationId}/forget`, () => {
+        forgetCalled = true;
+        return HttpResponse.json({
+          conversation_id: conversationId,
+          created_at: "2024-01-01T00:00:00Z",
+          updated_at: "2024-01-01T00:01:00Z",
+          document_ids: null,
+          turns: [],
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<CopilotPage />, { route: "/copilot" });
+
+    await user.type(screen.getByLabelText(/ask about your documents/i), "First question?");
+    await user.click(screen.getByRole("button", { name: /send question/i }));
+    expect(await screen.findByText("First answer.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /forget context/i }));
+
+    await waitFor(() => expect(forgetCalled).toBe(true));
+    // The visible thread is cleared to match the server forgetting the turns.
+    await waitFor(() =>
+      expect(screen.queryByText("First question?")).not.toBeInTheDocument(),
+    );
   });
 });

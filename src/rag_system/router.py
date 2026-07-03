@@ -11,11 +11,16 @@ from typing import Any, Iterator
 
 from pydantic import BaseModel, Field
 
+from rag_system.abstention import evaluate_abstention
 from rag_system.config import Settings
 from rag_system.confidence import combine_confidence_scores
+from rag_system.clarification import ClarificationStore, resolve_clarification_question
+from rag_system.conversation import ConversationManager, PreparedTurn
 from rag_system.copilot import DatabaseCopilotService
 from rag_system.llm import build_text_llm
 from rag_system.models import (
+    AbstentionResponse,
+    ClarificationPrompt,
     CopilotQueryRequest,
     QueryRequest,
     UnifiedQueryRequest,
@@ -50,6 +55,16 @@ class RoutingDecision(BaseModel):
     route: QueryRoute
     reasoning: str
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    #: R2.1 — the question is too ambiguous to answer and needs one focused
+    #: clarifying question first. ``route`` still carries the best-guess route
+    #: to use once the ambiguity is resolved (or as a fallback).
+    ambiguous: bool = Field(default=False)
+    #: R2.9 — the ambiguity is specifically about which document scope to
+    #: search (the caller's selected documents vs. the entire corpus).
+    scope_ambiguous: bool = Field(default=False)
+    #: The single focused question to ask when ``ambiguous`` is set. ``None``
+    #: lets the caller fall back to a default clarifying question.
+    clarification_question: str | None = Field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +134,8 @@ class AgenticRouter:
         settings: Settings,
         rag_service: Any,  # RagService — typed as Any to avoid circular import
         copilot_service: DatabaseCopilotService | None,
+        conversations: ConversationManager | None = None,
+        clarifications: ClarificationStore | None = None,
     ):
         self._settings = settings
         self._llm = build_text_llm(settings)
@@ -127,6 +144,12 @@ class AgenticRouter:
         self._rag = rag_service
         self._copilot = copilot_service
         self._copilot_available = copilot_service is not None
+        # Multi-turn state. When absent the router behaves statelessly (each
+        # request is a fresh, independent turn), preserving single-turn callers.
+        self._conversations = conversations
+        # Ambiguity clarification (R2). Built lazily from the RAG service's
+        # shared artifact store when not injected, so tests can supply a fake.
+        self._clarifications = clarifications
 
         # Pre-load table names so the classifier prompt knows what data is available
         self._table_names: list[str] = []
@@ -143,18 +166,186 @@ class AgenticRouter:
         )
 
     # ------------------------------------------------------------------
+    # Conversation preparation
+    # ------------------------------------------------------------------
+
+    def _prepare_conversation(
+        self, request: UnifiedQueryRequest
+    ) -> tuple[UnifiedQueryRequest, str | None, str | None, PreparedTurn | None]:
+        """Resolve multi-turn context for a request.
+
+        Returns ``(effective_request, conversation_id, rewritten_question,
+        prepared)``. When no conversation manager is wired, the request is
+        returned unchanged and there is nothing to record.
+        """
+        if self._conversations is None:
+            return request, None, None, None
+        prepared = self._conversations.prepare(request)
+        return (
+            prepared.effective_request,
+            prepared.conversation_id,
+            prepared.rewritten_question,
+            prepared,
+        )
+
+    # ------------------------------------------------------------------
+    # Ambiguity clarification (R2)
+    # ------------------------------------------------------------------
+
+    def _clarification_store(self) -> ClarificationStore | None:
+        """Return the clarification store, building it lazily from the RAG
+        service's shared artifact store when one was not injected.
+
+        Returns ``None`` (so the caller degrades to normal routing) if no store
+        can be resolved rather than failing the user's query.
+        """
+        if self._clarifications is not None:
+            return self._clarifications
+        store = getattr(self._rag, "artifact_store", None)
+        if store is None:
+            return None
+        self._clarifications = ClarificationStore(store, self._settings)
+        return self._clarifications
+
+    def _issue_clarification(
+        self,
+        request: UnifiedQueryRequest,
+        decision: RoutingDecision,
+        conversation_turn_id: str,
+        log_extra: dict[str, Any],
+    ) -> ClarificationPrompt | None:
+        """Persist a clarification record and return the prompt (R2.1, R2.2).
+
+        Returns ``None`` when no clarification store is available or persistence
+        fails, so the router degrades to routing the best-guess route instead of
+        failing the query.
+        """
+        store = self._clarification_store()
+        if store is None:
+            logger.warning(
+                "Ambiguous query but no clarification store available — routing anyway",
+                extra=log_extra,
+            )
+            return None
+
+        question = resolve_clarification_question(
+            scope_ambiguous=decision.scope_ambiguous,
+            clarification_question=decision.clarification_question,
+        )
+        try:
+            return store.issue(
+                original_question=request.question,
+                conversation_turn_id=conversation_turn_id,
+                clarification_question=question,
+                document_scope=request.document_ids,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist clarification — routing anyway", extra=log_extra
+            )
+            return None
+
+    # ------------------------------------------------------------------
+    # Abstention gates (R3.1–R3.6)
+    # ------------------------------------------------------------------
+
+    def _evaluate_abstention_for_response(
+        self,
+        response: UnifiedQueryResponse,
+        trace_id: str,
+    ) -> AbstentionResponse | None:
+        """Run the six-trigger abstention evaluation on a completed response.
+
+        The retrieval and post-generation gates are evaluated together because
+        the response already carries the signals (confidence score, claims,
+        evidence items, route) produced by the pipeline.
+        """
+        # For the sql_no_rows gate, check if this is a database route with empty
+        # rows.
+        sql_row_count: int | None = None
+        if response.route == "database":
+            sql_row_count = len(response.rows)
+
+        # Gather conflicting claim ids from the claims.
+        from rag_system.abstention import has_conflicting_evidence as _has_conflict
+
+        conflicting_ids: set[str] = set()
+        for claim in response.claims:
+            if _has_conflict(claim):
+                conflicting_ids.add(claim.claim_id)
+
+        # Retrieval gates (R3.2 no_evidence, R3.6 retrieval_below_threshold) only
+        # apply to the pure ``rag`` route, where retrieval is the sole evidence
+        # source. On ``hybrid`` the database side may legitimately answer with no
+        # passages, and ``database`` performs no passage retrieval — so we pass
+        # ``None`` (gate skipped) for those and let their own signals decide.
+        retrieval_scores: list[float] | None = None
+        if response.route == "rag":
+            retrieval_scores = list(response.retrieval_scores)
+
+        return evaluate_abstention(
+            trace_id=trace_id,
+            route=response.route,
+            confidence_score=response.confidence_score,
+            route_min_confidence=getattr(self._settings, "route_min_confidence", 0.0),
+            claims=response.claims if response.claims else None,
+            conflicting_claim_ids=conflicting_ids if conflicting_ids else None,
+            sql_row_count=sql_row_count,
+            retrieval_score_threshold=getattr(
+                self._settings, "retrieval_score_threshold", 0.0
+            ),
+            retrieval_scores=retrieval_scores,
+        )
+
+    # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
 
-    def query(self, request: UnifiedQueryRequest) -> UnifiedQueryResponse:
+    def query(
+        self,
+        request: UnifiedQueryRequest,
+        *,
+        allow_clarification: bool = True,
+    ) -> UnifiedQueryResponse | ClarificationPrompt | AbstentionResponse:
+        """Classify and route a query, or ask for clarification when ambiguous.
+
+        Returns a :class:`ClarificationPrompt` (instead of routing) when the
+        classifier flags the question as ambiguous and ``allow_clarification``
+        is set. Returns an :class:`AbstentionResponse` when a retrieval or
+        post-generation gate fires. A clarification reply re-runs this path with
+        ``allow_clarification=False`` so at most one clarification is issued per
+        original question (R2.7).
+        """
         trace_id = get_trace_id() or str(uuid.uuid4())
-        log_extra: dict[str, Any] = {"trace_id": trace_id, "query_len": len(request.question)}
+        effective, conversation_id, rewritten_question, prepared = (
+            self._prepare_conversation(request)
+        )
+        log_extra: dict[str, Any] = {
+            "trace_id": trace_id,
+            "query_len": len(effective.question),
+            "conversation_id": conversation_id,
+            "rewritten": rewritten_question is not None,
+        }
 
         # Own the per-request query summary so the nested RAG/copilot calls don't
         # each record their own; exactly one summary lands on this /ask trace.
         with unified_query_scope():
             with timed(logger, "query classification", **log_extra):
-                decision = self._classifier.classify(request.question, self._table_names)
+                decision = self._classifier.classify(effective.question, self._table_names)
+
+            # Ambiguity gate (R2.1): ask one focused clarifying question instead
+            # of guessing — unless this turn is already a clarification reply.
+            if allow_clarification and decision.ambiguous:
+                conversation_turn_id = (
+                    f"{prepared.conversation_id}:{len(prepared.conversation.turns)}"
+                    if prepared is not None
+                    else trace_id
+                )
+                prompt = self._issue_clarification(
+                    effective, decision, conversation_turn_id, log_extra
+                )
+                if prompt is not None:
+                    return prompt
 
             # If copilot is unavailable, force RAG route
             if decision.route in (QueryRoute.database, QueryRoute.hybrid) and not self._copilot_available:
@@ -169,13 +360,41 @@ class AgenticRouter:
                 )
 
             if decision.route == QueryRoute.rag:
-                response = self._route_rag(request, decision, log_extra)
+                response = self._route_rag(effective, decision, log_extra)
             elif decision.route == QueryRoute.database:
-                response = self._route_database(request, decision, log_extra)
+                response = self._route_database(effective, decision, log_extra)
             else:
-                response = self._route_hybrid(request, decision, trace_id, log_extra)
+                response = self._route_hybrid(effective, decision, trace_id, log_extra)
 
-        record_query_summary(request.question, response.confidence_score)
+        # --- Abstention gates (R3.1–R3.6) ---
+        # Evaluate post-generation abstention after the pipeline produces a
+        # response with claims. Retrieval scores are derived from the response
+        # and the route's threshold settings.
+        abstention = self._evaluate_abstention_for_response(response, trace_id)
+        if abstention is not None:
+            logger.info(
+                "Abstention gate fired: %s (trace=%s)",
+                abstention.reason_code,
+                trace_id,
+                extra={**log_extra, "reason_code": abstention.reason_code},
+            )
+            metrics.increment(
+                "rag_abstention_total", {"reason_code": abstention.reason_code}
+            )
+            record_query_summary(effective.question, response.confidence_score)
+            return abstention
+
+        response.conversation_id = conversation_id
+        response.rewritten_question = rewritten_question
+        if prepared is not None:
+            self._conversations.record_turn(
+                prepared,
+                answer=response.answer,
+                route=response.route,
+                trace_id=response.trace_id,
+            )
+
+        record_query_summary(effective.question, response.confidence_score)
         return response
 
     # ------------------------------------------------------------------
@@ -185,19 +404,52 @@ class AgenticRouter:
     def query_stream(self, request: UnifiedQueryRequest) -> Iterator[dict[str, Any]]:
         """Stream a unified answer as Server-Sent-Event-style dicts.
 
-        Yields ``meta`` (routing decision), ``status`` (pipeline stage),
-        ``delta`` (answer text chunks), and a terminal ``final`` event carrying
-        the full :class:`UnifiedQueryResponse` payload. Exactly one query
-        summary is recorded for the whole request (the router owns it).
+        Emits stage-progress events (``classify``, ``retrieve``, ``generate``,
+        ``verify``) for liveness but **holds answer content** — it does not
+        forward generated tokens — until the abstention gates and
+        claim-verification have run. The stream ends with exactly **one terminal
+        event** carrying one of: the answer with claims/evidence, a
+        ``Clarification_Prompt``, or an ``Abstention_Response`` (no answer
+        content). A post-generation abstention therefore leaks no tokens (R3.7).
         """
         trace_id = get_trace_id() or str(uuid.uuid4())
-        log_extra: dict[str, Any] = {"trace_id": trace_id, "query_len": len(request.question)}
-        final_confidence: float | None = None
+        effective, conversation_id, rewritten_question, prepared = (
+            self._prepare_conversation(request)
+        )
+        log_extra: dict[str, Any] = {
+            "trace_id": trace_id,
+            "query_len": len(effective.question),
+            "conversation_id": conversation_id,
+            "rewritten": rewritten_question is not None,
+        }
 
         with unified_query_scope():
-            yield {"type": "status", "stage": "classifying"}
+            # --- Stage: classify ---
+            yield {"type": "status", "stage": "classify"}
             with timed(logger, "query classification", **log_extra):
-                decision = self._classifier.classify(request.question, self._table_names)
+                decision = self._classifier.classify(effective.question, self._table_names)
+
+            # Ambiguity gate — if ambiguous, yield one terminal clarification
+            # event and end the stream.
+            if decision.ambiguous:
+                conversation_turn_id = (
+                    f"{prepared.conversation_id}:{len(prepared.conversation.turns)}"
+                    if prepared is not None
+                    else trace_id
+                )
+                prompt = self._issue_clarification(
+                    effective, decision, conversation_turn_id, log_extra
+                )
+                if prompt is not None:
+                    yield {
+                        "type": "terminal",
+                        "kind": "clarification",
+                        "payload": prompt.model_dump(mode="json"),
+                        "trace_id": trace_id,
+                        "conversation_id": conversation_id,
+                    }
+                    record_query_summary(effective.question, None)
+                    return
 
             if (
                 decision.route in (QueryRoute.database, QueryRoute.hybrid)
@@ -216,26 +468,67 @@ class AgenticRouter:
                     confidence=decision.confidence,
                 )
 
+            # --- Stage: retrieve ---
+            yield {"type": "status", "stage": "retrieve"}
+
+            # --- Stage: generate ---
+            yield {"type": "status", "stage": "generate"}
+
+            # Execute the full pipeline (which includes retrieve + generate +
+            # claim mapping internally) and collect the response WITHOUT
+            # forwarding any tokens to the client.
+            if decision.route == QueryRoute.rag:
+                response = self._route_rag(effective, decision, log_extra)
+            elif decision.route == QueryRoute.database:
+                response = self._route_database(effective, decision, log_extra)
+            else:
+                response = self._route_hybrid(effective, decision, trace_id, log_extra)
+
+            # --- Stage: verify (abstention gates + claim verification) ---
+            yield {"type": "status", "stage": "verify"}
+
+            abstention = self._evaluate_abstention_for_response(response, trace_id)
+            if abstention is not None:
+                logger.info(
+                    "Abstention gate fired (stream): %s (trace=%s)",
+                    abstention.reason_code,
+                    trace_id,
+                    extra={**log_extra, "reason_code": abstention.reason_code},
+                )
+                metrics.increment(
+                    "rag_abstention_total", {"reason_code": abstention.reason_code}
+                )
+                yield {
+                    "type": "terminal",
+                    "kind": "abstention",
+                    "payload": abstention.model_dump(mode="json"),
+                    "trace_id": trace_id,
+                    "conversation_id": conversation_id,
+                }
+                record_query_summary(effective.question, response.confidence_score)
+                return
+
+            # All gates passed — emit the terminal answer event.
+            response.conversation_id = conversation_id
+            response.rewritten_question = rewritten_question
+
+            if prepared is not None:
+                self._conversations.record_turn(
+                    prepared,
+                    answer=response.answer,
+                    route=response.route,
+                    trace_id=response.trace_id,
+                )
+
             yield {
-                "type": "meta",
+                "type": "terminal",
+                "kind": "answer",
+                "payload": response.model_dump(mode="json"),
                 "trace_id": trace_id,
-                "route": str(decision.route),
-                "routing_reasoning": decision.reasoning,
+                "conversation_id": conversation_id,
             }
 
-            if decision.route == QueryRoute.rag:
-                stream = self._stream_rag(request, decision)
-            elif decision.route == QueryRoute.database:
-                stream = self._stream_database(request, decision)
-            else:
-                stream = self._stream_hybrid(request, decision, trace_id)
-
-            for event in stream:
-                if event.get("type") == "final":
-                    final_confidence = event.get("confidence_score")
-                yield event
-
-        record_query_summary(request.question, final_confidence)
+        record_query_summary(effective.question, response.confidence_score)
 
     def _stream_rag(
         self, request: UnifiedQueryRequest, decision: RoutingDecision
@@ -364,6 +657,9 @@ class AgenticRouter:
             confidence_score=rag_response.confidence_score,
             insufficient_evidence_reason=rag_response.insufficient_evidence_reason,
             routing_reasoning=decision.reasoning,
+            claims=rag_response.claims,
+            claim_decomposition_failed=rag_response.claim_decomposition_failed,
+            retrieval_scores=rag_response.retrieval_scores,
         )
 
     def _route_database(
@@ -575,13 +871,22 @@ def _build_classification_prompt(question: str, available_tables: list[str]) -> 
         "   database data to produce a complete answer. For example: \"How does our refund\n"
         "   policy compare to actual refund rates this quarter?\"\n"
         "\n"
+        "Also decide whether the question is AMBIGUOUS — too under-specified to answer\n"
+        "accurately without guessing. If it is, set \"ambiguous\": true and provide a single,\n"
+        "focused \"clarification_question\" that would resolve the ambiguity. When the ambiguity\n"
+        "is specifically about WHICH DOCUMENTS to search (for example the question could refer\n"
+        "to the caller's selected documents or the entire corpus), also set\n"
+        "\"scope_ambiguous\": true. Still pick the best-guess route so it can be used once the\n"
+        "ambiguity is resolved.\n"
+        "\n"
         f"Classify the following question into exactly one route.\n"
         f"\n"
         f"Question: {question}\n"
         f"\n"
         "Return ONLY valid JSON with no markdown formatting:\n"
         '{"route": "rag" | "database" | "hybrid", "reasoning": "one sentence explanation", '
-        '"confidence": 0.0 to 1.0}'
+        '"confidence": 0.0 to 1.0, "ambiguous": true | false, "scope_ambiguous": true | false, '
+        '"clarification_question": "one focused question or null"}'
     )
 
 
@@ -690,10 +995,20 @@ def _parse_routing_response(raw: str) -> RoutingDecision:
         route = payload.get("route", "rag").lower()
         if route not in ("rag", "database", "hybrid"):
             route = "rag"
+        scope_ambiguous = bool(payload.get("scope_ambiguous", False))
+        # Scope ambiguity is a kind of ambiguity — treat it as ambiguous even if
+        # the model only set the narrower flag.
+        ambiguous = bool(payload.get("ambiguous", False)) or scope_ambiguous
+        clarification_question = payload.get("clarification_question")
+        if clarification_question is not None:
+            clarification_question = str(clarification_question).strip() or None
         return RoutingDecision(
             route=QueryRoute(route),
             reasoning=str(payload.get("reasoning", "Classified by LLM")),
             confidence=float(payload.get("confidence", 0.8)),
+            ambiguous=ambiguous,
+            scope_ambiguous=scope_ambiguous,
+            clarification_question=clarification_question,
         )
     except (json.JSONDecodeError, ValueError, KeyError) as exc:
         logger.warning(
