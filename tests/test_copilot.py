@@ -333,3 +333,51 @@ def test_copilot_api_query_with_mocked_dependencies(monkeypatch) -> None:
     assert body["evidence_status"] == "grounded"
     assert body["sql"].startswith("select sum")
     assert body["rows"] == [{"revenue": 1250}]
+
+
+def test_copilot_api_include_sql_false_strips_sql_and_rows(monkeypatch) -> None:
+    """Regression: include_sql=False must not surface sql/rows to the client."""
+    service = DatabaseCopilotService(SimpleNamespace(copilot_max_rows=25))
+    service._catalog = _catalog()
+    service._guard = CopilotSqlGuard(service._catalog, max_rows=25)
+    service._generator = FakeGenerator()
+    service._executor = FakeExecutor()
+
+    monkeypatch.setattr(api_module, "get_copilot_service", lambda: service)
+    client = TestClient(api_module.app)
+
+    response = client.post(
+        "/copilot/query",
+        json={"question": "What was total sales today?", "include_sql": False},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # Answer should still be present
+    assert body["answer"] == "Total sales were 1250."
+    assert body["evidence_status"] == "grounded"
+    # SQL and rows must be stripped for the client
+    assert body["sql"] is None
+    assert body["rows"] == []
+
+
+def test_copilot_service_always_returns_rows_for_abstention_check() -> None:
+    """Regression: the service must always return actual rows so the router's
+    sql_no_rows abstention gate does not fire spuriously when include_sql=False.
+    """
+    service = DatabaseCopilotService(SimpleNamespace(copilot_max_rows=25))
+    service._catalog = _catalog()
+    service._guard = CopilotSqlGuard(service._catalog, max_rows=25)
+    service._generator = FakeGenerator()
+    service._executor = FakeExecutor()
+
+    from rag_system.models import CopilotQueryRequest
+
+    # With include_sql=False (user default)
+    request = CopilotQueryRequest(question="What was total sales today?", include_sql=False)
+    response = service.query(request)
+
+    # The service response must carry the real rows (for the router's abstention check)
+    assert response.rows == [{"revenue": 1250}]
+    assert response.sql is not None
+    assert response.evidence_status == "grounded"

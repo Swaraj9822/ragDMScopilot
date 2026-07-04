@@ -520,6 +520,11 @@ class AgenticRouter:
                     trace_id=response.trace_id,
                 )
 
+            # Strip SQL/rows from the client-facing payload when not requested.
+            if not effective.include_sql:
+                response.sql = None
+                response.rows = []
+
             yield {
                 "type": "terminal",
                 "kind": "answer",

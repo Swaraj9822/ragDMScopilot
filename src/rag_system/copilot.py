@@ -492,8 +492,8 @@ class DatabaseCopilotService:
             evidence_status=evidence_status,
             trace_id=trace_id,
             confidence_score=confidence_score,
-            sql=sql if request.include_sql else None,
-            rows=rows if request.include_sql else [],
+            sql=sql,
+            rows=rows,
             data_sources=self.guard.data_sources(sql),
         )
 
@@ -547,8 +547,8 @@ class DatabaseCopilotService:
                 evidence_status=evidence_status,
                 trace_id=trace_id,
                 confidence_score=confidence_score,
-                sql=sql if request.include_sql else None,
-                rows=rows if request.include_sql else [],
+                sql=sql,
+                rows=rows,
                 data_sources=self.guard.data_sources(sql),
             ),
         }

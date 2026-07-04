@@ -704,6 +704,9 @@ def ask(request: UnifiedQueryRequest) -> UnifiedQueryResponse | ClarificationPro
     )
     try:
         result = get_router().query(request)
+        if isinstance(result, UnifiedQueryResponse) and not request.include_sql:
+            result.sql = None
+            result.rows = []
         return result
     except (FileNotFoundError, RuntimeError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -1017,7 +1020,11 @@ def copilot_query(request: CopilotQueryRequest) -> CopilotQueryResponse:
         extra={"query_len": len(request.question)},
     )
     try:
-        return get_copilot_service().query(request)
+        result = get_copilot_service().query(request)
+        if not request.include_sql:
+            result.sql = None
+            result.rows = []
+        return result
     except (FileNotFoundError, RuntimeError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except SqlValidationError as exc:
