@@ -71,12 +71,21 @@ jobs:
           cd "${REMOTE_DIR}"
           echo "Deploying ref '${DEPLOY_REF}' in \$(pwd)"
           git fetch --all --prune --tags
+          # A deploy target should be an exact mirror of the ref. If someone has
+          # edited files directly on the VM, those changes would otherwise block
+          # (or, under the old "|| true", be silently baked into) the deploy.
+          # Stash any local drift first so it is preserved (recoverable via
+          # 'git stash list') rather than lost, and the tree is clean to advance.
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "::warning::Uncommitted changes found on the VM; stashing them (recover with 'git stash list')."
+            git stash push --include-untracked -m "deploy-autostash"
+          fi
           git checkout "${DEPLOY_REF}"
           # Fast-forward to the fetched remote tip when deploying a branch. For a
           # tag or SHA the checkout above already pins the exact commit, so there
-          # is nothing to pull. A genuine fast-forward failure (divergence or a
-          # conflicting local checkout) now fails the deploy instead of being
-          # silently swallowed by "|| true", which could ship stale code.
+          # is nothing to pull. A genuine fast-forward failure (divergence)
+          # now fails the deploy instead of being silently swallowed by
+          # "|| true", which could ship stale code.
           if git show-ref --verify --quiet "refs/remotes/origin/${DEPLOY_REF}"; then
             git merge --ff-only "origin/${DEPLOY_REF}"
           fi
