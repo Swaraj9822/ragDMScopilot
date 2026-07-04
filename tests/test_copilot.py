@@ -300,13 +300,12 @@ def test_postgres_executor_sets_timeout_with_set_config(monkeypatch) -> None:
     )
 
     assert rows == [{"revenue": 1250}]
-    # The connection is opened read-only at the server level (defense in depth).
-    assert calls[0][0] == "connect"
-    assert calls[0][1]["options"] == "-c default_transaction_read_only=on"
-    # And the transaction is explicitly marked READ ONLY. A bare
-    # "BEGIN READ ONLY" would be a silent no-op under psycopg's autocommit=False
-    # (it runs inside the already-open implicit transaction), so we must use
-    # "SET TRANSACTION READ ONLY" instead.
+    # The transaction is explicitly marked READ ONLY. A bare "BEGIN READ ONLY"
+    # would be a silent no-op under psycopg's autocommit=False (it runs inside
+    # the already-open implicit transaction), so we must use "SET TRANSACTION
+    # READ ONLY" instead. We do NOT pass a default_transaction_read_only startup
+    # option, since pooled providers (e.g. Neon) reject unknown startup params.
+    assert "options" not in calls[0][1]
     assert calls[1] == ("execute", "SET TRANSACTION READ ONLY", None)
     assert not any(
         entry[0] == "execute" and str(entry[1]).upper().startswith("BEGIN")

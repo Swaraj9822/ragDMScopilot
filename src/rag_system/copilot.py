@@ -406,9 +406,6 @@ class PostgresCopilotExecutor:
             password=self._settings.copilot_db_password,
             sslmode=self._settings.copilot_db_sslmode,
             row_factory=dict_row,
-            # Defense in depth: make every transaction on this connection
-            # read-only at the server level, independent of statement ordering.
-            options="-c default_transaction_read_only=on",
         ) as conn:
             # psycopg connects with autocommit=False, so the first execute()
             # implicitly opens a transaction *before* the statement runs. A bare
@@ -416,7 +413,13 @@ class PostgresCopilotExecutor:
             # transaction — Postgres warns "there is already a transaction in
             # progress" and the READ ONLY attribute is never applied. Use
             # "SET TRANSACTION READ ONLY", which is valid inside the open
-            # transaction and applies to it, as the explicit guard against writes.
+            # transaction and applies to it, as the guard against writes.
+            #
+            # NOTE: we deliberately do NOT set default_transaction_read_only via
+            # the connection ``options`` startup parameter — pooled providers
+            # (e.g. Neon's PgBouncer pooler) reject unknown startup parameters
+            # ("unsupported startup parameter in options"). SET TRANSACTION is a
+            # plain SQL command and works on both pooled and direct connections.
             conn.execute("SET TRANSACTION READ ONLY")
             conn.execute(
                 "SELECT set_config('statement_timeout', %s, true)",
