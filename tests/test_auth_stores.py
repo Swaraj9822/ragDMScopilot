@@ -190,3 +190,22 @@ def test_refresh_revoke_all_for_user_counts_only_active():
     assert store.get_by_hash("h3").is_revoked is False  # other user untouched
     # Revoking again is a no-op (nothing active left).
     assert store.revoke_all_for_user("user-1") == 0
+
+
+def test_refresh_delete_expired_removes_only_past_expiry():
+    store, _ = _refresh_store()
+    now = datetime.now(timezone.utc)
+    store.create("user-1", "expired-1", now - timedelta(seconds=1))
+    store.create("user-1", "expired-2", now - timedelta(days=5))
+    store.create("user-2", "live", now + timedelta(days=30))
+
+    deleted = store.delete_expired()
+
+    assert deleted == 2
+    # Expired rows are gone; the still-valid token is untouched.
+    assert store.get_by_hash("expired-1") is None
+    assert store.get_by_hash("expired-2") is None
+    assert store.get_by_hash("live") is not None
+    # Running again with nothing expired removes nothing.
+    assert store.delete_expired() == 0
+

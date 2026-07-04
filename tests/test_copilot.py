@@ -221,6 +221,37 @@ def test_sql_guard_clamps_large_limits() -> None:
     assert "LIMIT 25" in sql
 
 
+def test_sql_guard_does_not_rewrite_limit_inside_string_literal() -> None:
+    # Regression: the old regex clamp ran over the raw text and would rewrite a
+    # "limit 999999" that appears inside a string literal. The AST-based clamp
+    # leaves string literals untouched.
+    guard = CopilotSqlGuard(_catalog(), max_rows=25)
+
+    sql = guard.validate(
+        "select sum(s.net_amount) as revenue "
+        "from sales_invoice s join party p on s.party_id = p.id "
+        "where p.name ilike '%limit 999999%'"
+    )
+
+    # The literal survives verbatim (the digits are not clamped to 25)...
+    assert "999999" in sql
+    # ...and no real LIMIT clause was fabricated for this single-row aggregate.
+    assert "LIMIT 25" not in sql.upper()
+
+
+def test_sql_guard_rejects_limit_all() -> None:
+    # "LIMIT ALL" is unbounded. sqlglot parses ALL as an identifier, so the
+    # column allowlist rejects it (fail-closed) rather than executing it
+    # unbounded — the old numeric regex ignored it entirely.
+    guard = CopilotSqlGuard(_catalog(), max_rows=25)
+
+    with pytest.raises(SqlValidationError):
+        guard.validate(
+            "select party_id, sum(net_amount) as revenue "
+            "from sales_invoice group by party_id limit all"
+        )
+
+
 def test_format_database_answer_uses_fixed_sections() -> None:
     answer = format_database_answer(
         '{"summary": ["Revenue was 100.", "One aggregate row was returned."], '
@@ -282,7 +313,18 @@ def test_postgres_executor_sets_timeout_with_set_config(monkeypatch) -> None:
     )
 
     assert rows == [{"revenue": 1250}]
-    assert calls[1] == ("execute", "BEGIN READ ONLY", None)
+    # The connection is opened read-only at the server level (defense in depth).
+    assert calls[0][0] == "connect"
+    assert calls[0][1]["options"] == "-c default_transaction_read_only=on"
+    # And the transaction is explicitly marked READ ONLY. A bare
+    # "BEGIN READ ONLY" would be a silent no-op under psycopg's autocommit=False
+    # (it runs inside the already-open implicit transaction), so we must use
+    # "SET TRANSACTION READ ONLY" instead.
+    assert calls[1] == ("execute", "SET TRANSACTION READ ONLY", None)
+    assert not any(
+        entry[0] == "execute" and str(entry[1]).upper().startswith("BEGIN")
+        for entry in calls
+    )
     assert calls[2] == (
         "execute",
         "SELECT set_config('statement_timeout', %s, true)",
@@ -381,3 +423,106 @@ def test_copilot_service_always_returns_rows_for_abstention_check() -> None:
     assert response.rows == [{"revenue": 1250}]
     assert response.sql is not None
     assert response.evidence_status == "grounded"
+
+
+# ---------------------------------------------------------------------------
+# Boot-time readiness validation + router RAG-only fallback (dead-fallback fix)
+# ---------------------------------------------------------------------------
+
+
+def _ready_settings(**overrides) -> SimpleNamespace:
+    base = dict(
+        copilot_db_host="localhost",
+        copilot_db_name="app",
+        copilot_db_user="app",
+        copilot_db_password="secret",
+        copilot_max_rows=25,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_validate_ready_passes_with_catalog_and_db_config() -> None:
+    service = DatabaseCopilotService(_ready_settings())
+    service._catalog = _catalog()  # inject to bypass file load
+    service.validate_ready()  # should not raise
+
+
+def test_validate_ready_raises_when_db_config_missing() -> None:
+    service = DatabaseCopilotService(
+        _ready_settings(copilot_db_host="", copilot_db_password="")
+    )
+    service._catalog = _catalog()
+    with pytest.raises(RuntimeError) as exc:
+        service.validate_ready()
+    assert "COPILOT_DB_HOST" in str(exc.value)
+    assert "COPILOT_DB_PASSWORD" in str(exc.value)
+
+
+def test_validate_ready_raises_when_catalog_missing() -> None:
+    # An absolute path (next to this test file) that is guaranteed not to exist,
+    # so load_schema_catalog raises FileNotFoundError without touching temp dirs.
+    from pathlib import Path
+
+    missing = Path(__file__).resolve().parent / "__no_such_copilot_catalog__.json"
+    assert not missing.exists()
+    settings = _ready_settings(copilot_schema_catalog_path=str(missing))
+    service = DatabaseCopilotService(settings)
+    with pytest.raises(FileNotFoundError):
+        service.validate_ready()
+
+
+def test_get_router_falls_back_to_rag_only_when_copilot_unready(monkeypatch) -> None:
+    """A copilot that fails boot-time validation degrades the router to RAG-only.
+
+    Regression for the previously-dead fallback: the service constructor never
+    raised (everything was lazy), so the ``except`` branch was unreachable and a
+    misconfigured copilot only surfaced as a 500 on the first copilot query.
+    """
+
+    class _UnreadyCopilot:
+        def validate_ready(self) -> None:
+            raise FileNotFoundError("catalog missing")
+
+    captured: dict[str, object] = {}
+
+    def fake_router(settings, rag, copilot, conversations=None):
+        captured["copilot"] = copilot
+        return object()
+
+    monkeypatch.setattr(api_module, "get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(api_module, "get_service", lambda: object())
+    monkeypatch.setattr(api_module, "get_conversations", lambda: object())
+    monkeypatch.setattr(api_module, "get_copilot_service", lambda: _UnreadyCopilot())
+    monkeypatch.setattr(api_module, "AgenticRouter", fake_router)
+
+    api_module.get_router.cache_clear()
+    try:
+        api_module.get_router()
+    finally:
+        api_module.get_router.cache_clear()
+
+    assert captured["copilot"] is None
+
+
+def test_get_router_keeps_copilot_when_ready(monkeypatch) -> None:
+    ready = SimpleNamespace(validate_ready=lambda: None)
+    captured: dict[str, object] = {}
+
+    def fake_router(settings, rag, copilot, conversations=None):
+        captured["copilot"] = copilot
+        return object()
+
+    monkeypatch.setattr(api_module, "get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(api_module, "get_service", lambda: object())
+    monkeypatch.setattr(api_module, "get_conversations", lambda: object())
+    monkeypatch.setattr(api_module, "get_copilot_service", lambda: ready)
+    monkeypatch.setattr(api_module, "AgenticRouter", fake_router)
+
+    api_module.get_router.cache_clear()
+    try:
+        api_module.get_router()
+    finally:
+        api_module.get_router.cache_clear()
+
+    assert captured["copilot"] is ready

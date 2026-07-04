@@ -140,6 +140,10 @@ async def lifespan(app: FastAPI):
                 "/metrics at the reverse proxy."
             )
 
+        # Prune expired refresh tokens periodically so the table does not grow
+        # ~1 row per login/refresh forever (the auth flow never deletes rows).
+        _start_refresh_token_cleanup(settings)
+
     if settings.tracing_enabled:
         _start_observability_platform()
 
@@ -190,8 +194,15 @@ def get_router() -> AgenticRouter:
     rag = get_service()
     try:
         copilot = get_copilot_service()
+        # Force boot-time validation (schema catalog + DB config) so a
+        # misconfigured copilot degrades to RAG-only here instead of failing
+        # the first copilot query with a 500. Everything on the service is
+        # otherwise lazy, so without this the except below is unreachable.
+        copilot.validate_ready()
     except Exception:
-        logger.warning("Copilot service unavailable — router will use RAG only")
+        logger.warning(
+            "Copilot service unavailable — router will use RAG only", exc_info=True
+        )
         copilot = None
     return AgenticRouter(settings, rag, copilot, conversations=get_conversations())
 
@@ -211,6 +222,36 @@ def get_log_store() -> PostgresLogStore:
 # ---------------------------------------------------------------------------
 
 _observability_started = False
+
+#: Idempotency guard + reference holder for the refresh-token cleanup daemon.
+_refresh_cleanup_started = False
+_refresh_cleanup_scheduler = None
+
+
+def _start_refresh_token_cleanup(settings: Settings) -> None:
+    """Start the background daemon that prunes expired refresh tokens.
+
+    Idempotent (guarded by ``_refresh_cleanup_started``). The scheduler is a
+    daemon thread that periodically calls ``delete_expired`` on the refresh-token
+    store; a reference is held module-side so it is not garbage collected. Best
+    effort — construction never touches the database (the store is lazy), and a
+    failed sweep is logged without crashing the thread.
+    """
+    global _refresh_cleanup_started, _refresh_cleanup_scheduler  # noqa: PLW0603
+    if _refresh_cleanup_started:
+        return
+    _refresh_cleanup_started = True
+
+    from rag_system.auth.cleanup import RefreshTokenCleanupScheduler
+    from rag_system.auth.refresh_store import PostgresRefreshTokenStore
+
+    scheduler = RefreshTokenCleanupScheduler(
+        PostgresRefreshTokenStore(settings),
+        interval_hours=getattr(settings, "retention_interval_hours", 24.0),
+    )
+    scheduler.start()
+    _refresh_cleanup_scheduler = scheduler
+    logger.info("Refresh-token cleanup scheduler started")
 
 
 def _start_observability_platform() -> None:
@@ -366,6 +407,37 @@ _MAX_LOG_LIMIT = 1000
 # ---------------------------------------------------------------------------
 # Middleware — log every request / response
 # ---------------------------------------------------------------------------
+
+#: Non-stream routes that produce a query trace which should record the
+#: producing AI configuration version (R9.1). ``/ask/stream`` stamps its own
+#: trace inside the response generator. Defined here, above the middleware that
+#: reads it, so the dependency is visible at the point of use.
+_ANSWER_TRACE_PATHS = frozenset({"/ask", "/query"})
+
+
+def _stamp_trace_config(span: object) -> None:
+    """Resolve the active AI configuration and stamp it on *span* (R9.1, R9.11).
+
+    Records the producing ``ai_configuration_version_id`` and its redacted
+    settings on the trace's root span so downstream consumers (feedback context,
+    replay comparison, trace diagnosis) can attribute an outcome to a config
+    version. Best-effort: any failure resolves to the ``unresolved`` sentinel
+    (R9.2) and never breaks the request.
+    """
+    try:
+        from rag_system.ai_config import AIConfigResolver, AIConfigurationStore
+        from rag_system.observability_tracing import build_trace_config_payload
+
+        resolver = AIConfigResolver(AIConfigurationStore(_get_artifact_store()))
+        resolved = resolver.resolve()
+        payload = build_trace_config_payload(resolved)
+        get_span_recorder().set_trace_config(
+            span,
+            ai_configuration_version_id=payload["ai_configuration_version_id"],
+            resolved_settings=payload["resolved_settings"],
+        )
+    except Exception:  # noqa: BLE001 - never let tracing break the answer path
+        logger.warning("Failed to stamp AI configuration on trace", exc_info=True)
 
 
 def _metric_path_label(request: Request) -> str:
@@ -718,37 +790,6 @@ def _format_sse(event: dict) -> str:
     """Serialize an event dict as a Server-Sent Event frame."""
     payload = _json.dumps(event, default=str, ensure_ascii=False)
     return f"event: {event['type']}\ndata: {payload}\n\n"
-
-
-#: Non-stream routes that produce a query trace which should record the
-#: producing AI configuration version (R9.1). ``/ask/stream`` stamps its own
-#: trace inside the response generator.
-_ANSWER_TRACE_PATHS = frozenset({"/ask", "/query"})
-
-
-def _stamp_trace_config(span: object) -> None:
-    """Resolve the active AI configuration and stamp it on *span* (R9.1, R9.11).
-
-    Records the producing ``ai_configuration_version_id`` and its redacted
-    settings on the trace's root span so downstream consumers (feedback context,
-    replay comparison, trace diagnosis) can attribute an outcome to a config
-    version. Best-effort: any failure resolves to the ``unresolved`` sentinel
-    (R9.2) and never breaks the request.
-    """
-    try:
-        from rag_system.ai_config import AIConfigResolver, AIConfigurationStore
-        from rag_system.observability_tracing import build_trace_config_payload
-
-        resolver = AIConfigResolver(AIConfigurationStore(_get_artifact_store()))
-        resolved = resolver.resolve()
-        payload = build_trace_config_payload(resolved)
-        get_span_recorder().set_trace_config(
-            span,
-            ai_configuration_version_id=payload["ai_configuration_version_id"],
-            resolved_settings=payload["resolved_settings"],
-        )
-    except Exception:  # noqa: BLE001 - never let tracing break the answer path
-        logger.warning("Failed to stamp AI configuration on trace", exc_info=True)
 
 
 @app.post(_ASK_STREAM_PATH, dependencies=[Depends(get_current_user)])

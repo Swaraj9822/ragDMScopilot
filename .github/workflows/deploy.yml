@@ -70,28 +70,44 @@ jobs:
           set -euo pipefail
           cd "${REMOTE_DIR}"
           echo "Deploying ref '${DEPLOY_REF}' in \$(pwd)"
-          git fetch --all --prune
+          git fetch --all --prune --tags
           git checkout "${DEPLOY_REF}"
-          git pull --ff-only origin "${DEPLOY_REF}" || true
+          # Fast-forward to the fetched remote tip when deploying a branch. For a
+          # tag or SHA the checkout above already pins the exact commit, so there
+          # is nothing to pull. A genuine fast-forward failure (divergence or a
+          # conflicting local checkout) now fails the deploy instead of being
+          # silently swallowed by "|| true", which could ship stale code.
+          if git show-ref --verify --quiet "refs/remotes/origin/${DEPLOY_REF}"; then
+            git merge --ff-only "origin/${DEPLOY_REF}"
+          fi
           docker compose up -d --build
           docker image prune -f
           docker compose ps
           EOF
 
       - name: Smoke check (API health via the public endpoint)
-        continue-on-error: true
         env:
           HEALTH_URL: ${{ vars.HEALTH_URL }}
         run: |
-          URL="${HEALTH_URL:-https://34.139.146.167.nip.io/api/health}"
-          echo "Checking $URL"
+          set -euo pipefail
+          # No hardcoded fallback URL: a baked-in VM IP silently rots when the
+          # instance is recreated. The public health URL is configured once as
+          # the HEALTH_URL repo variable (Settings -> Variables).
+          if [ -z "${HEALTH_URL:-}" ]; then
+            echo "HEALTH_URL is not configured (Settings -> Variables)."
+            echo "Skipping smoke check — set HEALTH_URL to verify post-deploy health."
+            exit 0
+          fi
+          echo "Checking $HEALTH_URL"
           for i in 1 2 3 4 5; do
-            if curl -fsS --max-time 10 "$URL"; then
+            if curl -fsS --max-time 10 "$HEALTH_URL"; then
               echo "Health check passed."
               exit 0
             fi
             echo "Attempt $i failed; retrying in 10s..."
             sleep 10
           done
-          echo "Health check did not pass (deploy may still be starting)."
+          # The step is no longer continue-on-error, so this failure actually
+          # marks the deployment red instead of being decorative.
+          echo "Health check did not pass after 5 attempts."
           exit 1

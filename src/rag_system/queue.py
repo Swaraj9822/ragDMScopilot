@@ -8,6 +8,12 @@ from rag_system.observability import get_logger, metrics, retry_on_transient
 
 logger = get_logger(__name__)
 
+#: Google Cloud Pub/Sub accepts at most 1000 messages per synchronous pull, so
+#: a request is bounded to this hard limit. The configured
+#: ``ingestion_max_messages`` is validated to ``[1, 1000]`` in Settings, so this
+#: clamp is only a defensive backstop (e.g. for hand-built settings in tests).
+_PUBSUB_MAX_MESSAGES_PER_PULL = 1000
+
 
 class IngestionJob(BaseModel):
     document_id: str
@@ -78,7 +84,9 @@ class PubSubIngestionQueue:
         response = self._subscriber.pull(
             request={
                 "subscription": self._subscription_path,
-                "max_messages": max(1, min(10, self._max_messages)),
+                "max_messages": max(
+                    1, min(_PUBSUB_MAX_MESSAGES_PER_PULL, self._max_messages)
+                ),
             },
             # Bound the synchronous pull so an empty subscription returns instead
             # of blocking the worker loop indefinitely.

@@ -206,3 +206,21 @@ def test_model_pricing_rejects_negative_price() -> None:
                 "bad": {"prompt_usd_per_1k": -1.0, "completion_usd_per_1k": 0.0}
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# Bounds - Pub/Sub ingestion pull size (must be within [1, 1000])
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [1, 10, 50, 1000])
+def test_ingestion_max_messages_accepts_in_range(value: int) -> None:
+    assert _build_settings(RAG_INGESTION_MAX_MESSAGES=value).ingestion_max_messages == value
+
+
+@pytest.mark.parametrize("value", [0, -1, 1001, 5000])
+def test_ingestion_max_messages_rejects_out_of_range(value: int) -> None:
+    # Pub/Sub caps a pull at 1000; a larger configured value is rejected at
+    # startup rather than being silently truncated at pull time.
+    with pytest.raises(pydantic.ValidationError):
+        _build_settings(RAG_INGESTION_MAX_MESSAGES=value)

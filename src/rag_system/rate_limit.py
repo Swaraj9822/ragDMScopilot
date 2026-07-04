@@ -30,8 +30,12 @@ __all__ = ["SlidingWindowRateLimiter", "rate_limit"]
 class SlidingWindowRateLimiter:
     """Allow at most *limit* events per *window_seconds* for a given key.
 
-    Uses a sliding window of event timestamps per key. Thread-safe; empty
-    buckets are pruned as keys go idle so memory tracks the active key set.
+    Uses a sliding window of event timestamps per key. Thread-safe. Fully-aged
+    keys are swept periodically (at most once per window) so memory tracks the
+    set of keys seen within roughly the last window rather than every key ever
+    observed. This matters because the limiter is keyed on the client IP —
+    including a spoofable ``X-Forwarded-For`` value — so without pruning a caller
+    cycling one-off keys would grow ``self._hits`` without bound.
     """
 
     def __init__(self, limit: int, window_seconds: float) -> None:
@@ -41,6 +45,24 @@ class SlidingWindowRateLimiter:
         self._window = float(window_seconds)
         self._hits: dict[str, list[float]] = {}
         self._lock = Lock()
+        # Timestamp of the last full sweep; a sweep runs at most once per window
+        # so pruning cost is amortised rather than paid on every check.
+        self._last_prune = time.monotonic()
+
+    def _prune(self, cutoff: float) -> None:
+        """Drop keys whose events have all aged out of the window.
+
+        The caller must hold ``self._lock``. Timestamps are appended in
+        monotonic order, so a bucket is fully expired when its most recent
+        entry is at or before *cutoff* (an empty bucket is expired too).
+        """
+        stale = [
+            key
+            for key, bucket in self._hits.items()
+            if not bucket or bucket[-1] <= cutoff
+        ]
+        for key in stale:
+            del self._hits[key]
 
     def check(self, key: str) -> tuple[bool, int]:
         """Record an attempt for *key*.
@@ -52,6 +74,12 @@ class SlidingWindowRateLimiter:
         now = time.monotonic()
         cutoff = now - self._window
         with self._lock:
+            # Opportunistically sweep fully-aged keys at most once per window so
+            # idle/one-off keys do not accumulate. Amortised across the window.
+            if now - self._last_prune >= self._window:
+                self._prune(cutoff)
+                self._last_prune = now
+
             bucket = self._hits.get(key)
             if bucket is None:
                 bucket = []
@@ -72,8 +100,6 @@ class SlidingWindowRateLimiter:
                 return False, retry_after
 
             bucket.append(now)
-            if not bucket:  # pragma: no cover - defensive
-                self._hits.pop(key, None)
             return True, 0
 
 

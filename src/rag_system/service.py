@@ -165,6 +165,16 @@ class RagService:
         )
 
     @property
+    def settings(self) -> Settings:
+        """The Settings this service was constructed with.
+
+        Exposed as a read-only property so collaborators (e.g. the ingestion
+        worker) can read configuration without reaching into the private
+        ``_settings`` attribute.
+        """
+        return self._settings
+
+    @property
     def queue(self) -> PubSubIngestionQueue:
         return self._queue
 

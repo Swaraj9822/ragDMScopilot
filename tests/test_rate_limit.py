@@ -57,6 +57,46 @@ def test_events_age_out_of_the_window(monkeypatch):
     assert limiter.check("k")[0] is True  # earlier event has aged out
 
 
+def test_idle_one_off_keys_are_pruned(monkeypatch):
+    """One-off keys must not accumulate forever (memory-leak regression).
+
+    Simulates an attacker cycling spoofed X-Forwarded-For values: each key is
+    seen once, then never again. Their fully-aged buckets must be swept so
+    ``_hits`` tracks the active key set rather than every key ever observed.
+    """
+    now = {"t": 1000.0}
+    monkeypatch.setattr(rate_limit_module.time, "monotonic", lambda: now["t"])
+
+    limiter = SlidingWindowRateLimiter(limit=1, window_seconds=10)
+
+    # 100 distinct one-off keys within the first window.
+    for i in range(100):
+        assert limiter.check(f"ip-{i}")[0] is True
+    assert len(limiter._hits) == 100
+
+    # Advance past the window and touch a single new key; the sweep should
+    # evict the 100 now-fully-aged keys, leaving only the active one.
+    now["t"] += 11
+    assert limiter.check("ip-live")[0] is True
+    assert set(limiter._hits) == {"ip-live"}
+
+
+def test_active_key_survives_pruning(monkeypatch):
+    """A key still receiving in-window hits is never pruned."""
+    now = {"t": 1000.0}
+    monkeypatch.setattr(rate_limit_module.time, "monotonic", lambda: now["t"])
+
+    limiter = SlidingWindowRateLimiter(limit=5, window_seconds=10)
+
+    # Keep "hot" active across several sweeps; "cold" is touched once and ages out.
+    assert limiter.check("cold")[0] is True
+    for _ in range(3):
+        assert limiter.check("hot")[0] is True
+        now["t"] += 11  # cross a window boundary each iteration -> triggers sweep
+    assert "hot" in limiter._hits
+    assert "cold" not in limiter._hits
+
+
 # --- dependency ------------------------------------------------------------
 
 
