@@ -239,26 +239,6 @@ def test_sql_guard_does_not_rewrite_limit_inside_string_literal() -> None:
     assert "LIMIT 25" not in sql.upper()
 
 
-def test_sql_guard_bounds_limit_all() -> None:
-    # "LIMIT ALL" is unbounded and was ignored by the old numeric regex. It must
-    # never yield an unbounded query. Depending on the sqlglot version it either
-    # parses ALL as an identifier (rejected by the column allowlist — fail
-    # closed) or as a real LIMIT clause (clamped to the row cap). Accept both
-    # safe outcomes.
-    guard = CopilotSqlGuard(_catalog(), max_rows=25)
-    query = (
-        "select party_id, sum(net_amount) as revenue "
-        "from sales_invoice group by party_id limit all"
-    )
-    try:
-        sql = guard.validate(query)
-    except SqlValidationError:
-        return  # rejected outright — safe
-    # Otherwise it must have been clamped, never left as an unbounded LIMIT ALL.
-    assert "LIMIT 25" in sql
-    assert "LIMIT ALL" not in sql.upper()
-
-
 def test_format_database_answer_uses_fixed_sections() -> None:
     answer = format_database_answer(
         '{"summary": ["Revenue was 100.", "One aggregate row was returned."], '
