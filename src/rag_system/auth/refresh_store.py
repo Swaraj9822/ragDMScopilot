@@ -70,6 +70,8 @@ _REVOKE_ALL_SQL = (
     "WHERE user_id = %s AND revoked_at IS NULL"
 )
 
+_DELETE_EXPIRED_SQL = "DELETE FROM refresh_tokens WHERE expires_at < now()"
+
 
 class PostgresRefreshTokenStore:
     def __init__(
@@ -134,6 +136,25 @@ class PostgresRefreshTokenStore:
             "Revoked all refresh tokens for user",
             extra={"user_id": user_id, "revoked_count": count},
         )
+        return count
+
+    def delete_expired(self) -> int:
+        """Delete every refresh token whose expiry has passed; return the count.
+
+        Expired rows serve no purpose: an expired token is rejected on refresh
+        (``is_expired``) whether or not it is still stored, so removing it keeps
+        the table from growing ~1 row per login/refresh forever. Revoked but
+        still-unexpired tokens are intentionally kept until they expire so reuse
+        detection can flag a replayed rotated token; once expired they are
+        pruned here too. Run periodically off the request path (see
+        :class:`rag_system.auth.cleanup.RefreshTokenCleanupScheduler`).
+        """
+        with self._connection_factory() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_DELETE_EXPIRED_SQL)
+                count = cur.rowcount
+        if count:
+            logger.info("Pruned expired refresh tokens", extra={"deleted_count": count})
         return count
 
 

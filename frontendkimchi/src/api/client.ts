@@ -147,10 +147,17 @@ async function rawRequest(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new TimeoutError()), timeoutMs);
 
-  // Bridge a caller-provided signal into our controller.
+  // Bridge a caller-provided signal into our controller, and remember the
+  // handler so it can be detached in `finally`. Without removal, a long-lived
+  // caller signal reused across many requests would accumulate one listener per
+  // request (a slow leak).
+  let onAbort: (() => void) | undefined;
   if (signal) {
     if (signal.aborted) controller.abort(signal.reason);
-    else signal.addEventListener("abort", () => controller.abort(signal.reason));
+    else {
+      onAbort = () => controller.abort(signal.reason);
+      signal.addEventListener("abort", onAbort);
+    }
   }
 
   const finalHeaders: Record<string, string> = {
@@ -190,6 +197,7 @@ async function rawRequest(
     throw new NetworkError((err as Error)?.message);
   } finally {
     clearTimeout(timeout);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
   }
 }
 
