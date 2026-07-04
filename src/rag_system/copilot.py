@@ -563,6 +563,11 @@ def build_sql_prompt(question: str, catalog_description: str) -> str:
         Always aggregate in SQL using COUNT, SUM, AVG, MIN, MAX, or another approved aggregate.
         Do not return transaction-level, customer-level, invoice-level, or other raw detail rows.
         If the user asks for a large/detail report, summarize it with grouped aggregate metrics.
+        When filtering by a product, customer, party, or other name, match case-insensitively
+        with partial matching using ILIKE '%term%' (e.g. product_name ILIKE '%life cheese%')
+        rather than exact equality (=) or LOWER(col) = '...'. Stored names include size or
+        variant suffixes and specific capitalization (e.g. 'Life Cheese 1L'), so exact matches
+        miss real rows. Use only the meaningful keywords from the user's phrasing in the pattern.
         Prefer business date columns from the schema for words like today, yesterday, month, or year.
         Include a LIMIT on grouped aggregate queries. Single-row aggregate queries do not need a LIMIT.
         Return only SQL, with no markdown.

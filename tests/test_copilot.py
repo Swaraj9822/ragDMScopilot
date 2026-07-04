@@ -196,6 +196,21 @@ def test_prompts_include_business_context() -> None:
     assert '"summary"' in answer_prompt
 
 
+def test_sql_prompt_instructs_partial_name_matching() -> None:
+    # Regression: names are stored with size/variant suffixes (e.g. "Life
+    # Cheese 1L"), so exact-equality filters returned zero rows. The prompt must
+    # steer the model toward case-insensitive partial matching with ILIKE.
+    sql_prompt = build_sql_prompt(
+        "how much quantity of life cheese was sold", _catalog().describe_for_prompt()
+    )
+
+    assert "ILIKE" in sql_prompt
+    assert "%" in sql_prompt
+    lowered = sql_prompt.lower()
+    assert "partial" in lowered
+    assert "case-insensitive" in lowered
+
+
 def test_sql_guard_clamps_large_limits() -> None:
     guard = CopilotSqlGuard(_catalog(), max_rows=25)
 
