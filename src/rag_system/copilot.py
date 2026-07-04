@@ -187,11 +187,11 @@ class CopilotSqlGuard:
       table (qualified columns must match the aliased table; unqualified ones
       must exist on some referenced table or be a projection alias).
 
-    Row limits are still clamped/appended on the original text so the returned
-    SQL keeps the model's formatting.
+    Row limits are clamped/appended using the parsed AST (never a regex over the
+    raw text), so a ``LIMIT`` inside a string literal is never mistaken for a
+    real clause. The model's text is preserved verbatim except when an oversized
+    ``LIMIT`` must be clamped, where the statement is re-serialised as PostgreSQL.
     """
-
-    _limit_pattern = re.compile(r"\blimit\s+(\d+)\b", re.IGNORECASE)
 
     # Nodes that must never appear anywhere in the tree. Data-modifying and
     # administrative statements can only reach a SELECT root by hiding inside a
@@ -317,18 +317,45 @@ class CopilotSqlGuard:
                 raise SqlValidationError(f"Unapproved column: {column.name}")
 
     def _apply_limit(self, sql: str, statement: exp.Select) -> str:
-        """Clamp/append the row limit on the original text.
+        """Clamp or append the row limit, driven by the parsed AST.
 
-        Operating on the model's text (rather than re-serialising the AST) keeps
-        the returned SQL byte-stable apart from the limit. A GROUP BY query with
-        no LIMIT gets one appended; an oversized literal LIMIT is clamped.
+        Using the AST to *decide* (rather than a regex over the raw text) means a
+        ``LIMIT`` appearing inside a string literal — e.g.
+        ``WHERE label = 'limit 999999'`` — is never mistaken for a real clause.
+        The model's text is returned verbatim in the common cases:
+
+        * a query whose ``LIMIT`` is already within ``max_rows`` is untouched;
+        * a grouped query with no ``LIMIT`` gets one appended at the end (an
+          append can never corrupt an interior literal);
+        * a single-row aggregate (no GROUP BY, no LIMIT) is left uncapped.
+
+        Only when an existing ``LIMIT`` exceeds the cap (or is non-numeric) is the
+        statement re-serialised, so the clamp is always correct regardless of any
+        string literals in the query. ``LIMIT ALL`` never reaches here — sqlglot
+        parses ``ALL`` as an identifier, so the column allowlist rejects it
+        upstream (fail-closed).
         """
-        limit = self._limit_pattern.search(sql)
-        if limit and int(limit.group(1)) > self._max_rows:
-            return self._limit_pattern.sub(f"LIMIT {self._max_rows}", sql, count=1)
-        if not limit and statement.args.get("group") is not None:
-            return f"{sql}\nLIMIT {self._max_rows}"
-        return sql
+        limit_node = statement.args.get("limit")
+        if limit_node is not None:
+            value = self._limit_value(limit_node)
+            if value is not None and value <= self._max_rows:
+                return sql  # within cap; keep the model's text verbatim
+            return statement.limit(self._max_rows).sql(dialect="postgres")  # clamp
+        if statement.args.get("group") is not None:
+            return f"{sql}\nLIMIT {self._max_rows}"  # append-only; text preserved
+        return sql  # single-row aggregate; no limit needed
+
+    @staticmethod
+    def _limit_value(limit_node: exp.Expression) -> int | None:
+        """Return the integer count of a ``LIMIT`` node, or ``None`` if it is not
+        a plain non-negative integer literal (e.g. a parameterised limit)."""
+        expression = limit_node.args.get("expression")
+        if isinstance(expression, exp.Literal) and expression.is_number:
+            try:
+                return int(expression.name)
+            except ValueError:
+                return None
+        return None
 
     def data_sources(self, sql: str) -> list[CopilotDataSource]:
         sources = []
@@ -379,8 +406,18 @@ class PostgresCopilotExecutor:
             password=self._settings.copilot_db_password,
             sslmode=self._settings.copilot_db_sslmode,
             row_factory=dict_row,
+            # Defense in depth: make every transaction on this connection
+            # read-only at the server level, independent of statement ordering.
+            options="-c default_transaction_read_only=on",
         ) as conn:
-            conn.execute("BEGIN READ ONLY")
+            # psycopg connects with autocommit=False, so the first execute()
+            # implicitly opens a transaction *before* the statement runs. A bare
+            # "BEGIN READ ONLY" would therefore execute inside that already-open
+            # transaction — Postgres warns "there is already a transaction in
+            # progress" and the READ ONLY attribute is never applied. Use
+            # "SET TRANSACTION READ ONLY", which is valid inside the open
+            # transaction and applies to it, as the explicit guard against writes.
+            conn.execute("SET TRANSACTION READ ONLY")
             conn.execute(
                 "SELECT set_config('statement_timeout', %s, true)",
                 (str(self._settings.copilot_statement_timeout_ms),),
@@ -456,6 +493,38 @@ class DatabaseCopilotService:
             self._generator = BedrockDatabaseCopilot(self._settings)
         return self._generator
 
+    def validate_ready(self) -> None:
+        """Eagerly check boot-time prerequisites so misconfiguration degrades
+        gracefully instead of failing the first query with a 500.
+
+        Everything on this service is otherwise lazy, so a missing schema
+        catalog or absent database configuration would only surface when the
+        first copilot query runs. Callers that want a startup-time signal (e.g.
+        the router factory, which falls back to RAG-only when the copilot is
+        unavailable) call this to force those checks up front. Raises
+        ``FileNotFoundError``/``ValueError`` if the catalog is missing or
+        malformed, or ``RuntimeError`` if required database settings are unset.
+
+        No network connection is attempted — only local configuration and the
+        catalog file are validated, so this stays fast and does not flap on a
+        transient database outage.
+        """
+        # Force the schema catalog to load (raises if missing/malformed).
+        _ = self.catalog
+        # The executor needs these to run any query, so without them the copilot
+        # can never produce an answer — treat that as "unavailable" at boot.
+        required = {
+            "COPILOT_DB_HOST": self._settings.copilot_db_host,
+            "COPILOT_DB_NAME": self._settings.copilot_db_name,
+            "COPILOT_DB_USER": self._settings.copilot_db_user,
+            "COPILOT_DB_PASSWORD": self._settings.copilot_db_password,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise RuntimeError(
+                f"Missing copilot database setting(s): {', '.join(missing)}"
+            )
+
     def query(self, request: CopilotQueryRequest) -> CopilotQueryResponse:
         trace_id = get_trace_id() or str(uuid.uuid4())
         log_extra = {"trace_id": trace_id, "query_len": len(request.question), "mode": "database"}
@@ -464,10 +533,12 @@ class DatabaseCopilotService:
 
         with timed(logger, "copilot SQL generation", **log_extra):
             sql = self.generator.generate_sql(request.question, self.catalog)
+        logger.info("Generated SQL: %s", sql, extra=log_extra)
         with timed(logger, "copilot SQL validation", **log_extra):
             sql = self.guard.validate(sql)
         with timed(logger, "copilot SQL execution", **log_extra):
             rows = self.executor.execute(sql)
+        logger.info("SQL returned %d row(s)", len(rows), extra=log_extra)
         with timed(logger, "copilot answer generation", **log_extra):
             answer = self.generator.answer(request.question, sql, rows)
 
@@ -512,11 +583,13 @@ class DatabaseCopilotService:
         yield {"type": "status", "stage": "generating_sql"}
         with timed(logger, "copilot SQL generation", **log_extra):
             sql = self.generator.generate_sql(request.question, self.catalog)
+        logger.info("Generated SQL: %s", sql, extra=log_extra)
         with timed(logger, "copilot SQL validation", **log_extra):
             sql = self.guard.validate(sql)
         yield {"type": "status", "stage": "running_sql"}
         with timed(logger, "copilot SQL execution", **log_extra):
             rows = self.executor.execute(sql)
+        logger.info("SQL returned %d row(s)", len(rows), extra=log_extra)
 
         yield {"type": "status", "stage": "generating"}
         answer_parts: list[str] = []

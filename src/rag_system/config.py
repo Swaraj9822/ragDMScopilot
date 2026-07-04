@@ -204,6 +204,7 @@ class Settings(BaseSettings):
         "pinecone_upsert_batch_size",
         "document_list_max_workers",
         "ingestion_max_concurrency",
+        "ingestion_max_messages",
     )
     @classmethod
     def _validate_positive_bounded_int(cls, value: int) -> int:
@@ -212,6 +213,9 @@ class Settings(BaseSettings):
         A zero/negative value would stall or crash the corresponding fan-out,
         and an absurdly large one would defeat the bound it exists to enforce,
         so we clamp the accepted range to ``[1, 1000]`` and fail fast otherwise.
+        ``ingestion_max_messages`` shares this bound because Pub/Sub accepts at
+        most 1000 messages per pull, so anything larger is rejected at startup
+        rather than being silently truncated at pull time.
         """
         if value < 1 or value > 1000:
             raise ValueError(

@@ -96,8 +96,35 @@ def test_receive_parses_ack_id_and_job() -> None:
     assert received[0].ack_id == "ack-123"
     assert received[0].message_id == "m-1"
     assert received[0].job.document_id == "doc-1"
-    # The pull is bounded by max_messages (clamped to [1, 10]).
+    # The pull is bounded by max_messages (validated to [1, 1000]); the
+    # configured value is honored rather than silently capped at 10.
     assert subscriber.pull_requests[0]["max_messages"] == 10
+
+
+def test_receive_honors_configured_max_messages_above_ten() -> None:
+    """Regression: a configured value above 10 must not be silently capped.
+
+    The old code hardcoded ``min(10, ...)``, so a subscription configured for
+    50 messages per pull only ever received 10.
+    """
+    subscriber = _FakeSubscriber([])
+    q = _queue(subscriber)
+    q._max_messages = 50
+
+    q.receive()
+
+    assert subscriber.pull_requests[0]["max_messages"] == 50
+
+
+def test_receive_clamps_to_pubsub_hard_limit() -> None:
+    """Values above Pub/Sub's 1000-per-pull limit are clamped defensively."""
+    subscriber = _FakeSubscriber([])
+    q = _queue(subscriber)
+    q._max_messages = 5000
+
+    q.receive()
+
+    assert subscriber.pull_requests[0]["max_messages"] == 1000
 
 
 def test_receive_empty_subscription_returns_empty_list() -> None:

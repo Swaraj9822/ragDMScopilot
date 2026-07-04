@@ -79,6 +79,14 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _coerce_dt(value) -> datetime:
+    """Parse a stored expiry (ISO string or datetime) into an aware datetime."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    parsed = datetime.fromisoformat(str(value))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 class InMemoryUserStore:
     """In-memory stand-in matching the ``PostgresUserStore`` interface."""
 
@@ -235,6 +243,8 @@ class _FakeCursor:
             self.rowcount = self._db.revoke_refresh(params[0])
         elif "UPDATE refresh_tokens SET revoked_at" in s and "WHERE user_id" in s:
             self.rowcount = self._db.revoke_all_refresh(params[0])
+        elif "DELETE FROM refresh_tokens WHERE expires_at" in s:
+            self.rowcount = self._db.delete_expired_refresh()
         else:  # pragma: no cover - unexpected SQL is a test bug
             raise AssertionError(f"unhandled SQL in FakeAuthDB: {s!r}")
 
@@ -323,3 +333,14 @@ class FakeAuthDB:
                 row[5] = _now()
                 count += 1
         return count
+
+    def delete_expired_refresh(self) -> int:
+        now = _now()
+        expired = [
+            token_id
+            for token_id, row in self.refresh.items()
+            if _coerce_dt(row[4]) < now
+        ]
+        for token_id in expired:
+            del self.refresh[token_id]
+        return len(expired)

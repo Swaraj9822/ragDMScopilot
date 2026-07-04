@@ -267,7 +267,9 @@ def test_worker_processes_batch_concurrently() -> None:
     lock = threading.Lock()
 
     class SlowService:
-        _settings = SimpleNamespace(ingestion_max_concurrency=4)
+        # Exposes the public ``settings`` property that RagService now provides
+        # (the worker reads config through it instead of the private attr).
+        settings = SimpleNamespace(ingestion_max_concurrency=4)
 
         async def process_document_job(self, job) -> None:
             nonlocal active, max_active

@@ -7,15 +7,15 @@ describe("tokenStore", () => {
     localStorage.clear();
   });
 
-  it("persists the access token but never a refresh token", async () => {
+  it("keeps the access token in memory only, never in localStorage", async () => {
     const store = await import("./tokenStore");
     store.setAccessToken("access-abc");
 
     expect(store.getAccessToken()).toBe("access-abc");
     expect(store.hasSession()).toBe(true);
-    // Access token mirrored to localStorage for reload persistence...
-    expect(localStorage.getItem(LOCALSTORAGE_KEYS.authAccessToken)).toBe("access-abc");
-    // ...but the refresh token is never written to JS-readable storage.
+    // Access token is memory-only, so an XSS payload cannot read it from
+    // storage; neither token is ever written to JS-readable storage.
+    expect(localStorage.getItem(LOCALSTORAGE_KEYS.authAccessToken)).toBeNull();
     expect(localStorage.getItem(LOCALSTORAGE_KEYS.authRefreshToken)).toBeNull();
   });
 
@@ -29,13 +29,15 @@ describe("tokenStore", () => {
     expect(localStorage.getItem(LOCALSTORAGE_KEYS.authAccessToken)).toBeNull();
   });
 
-  it("purges any refresh token left in localStorage by an older build", async () => {
-    // Simulate a legacy persisted refresh token, then (re)load the module so
-    // its top-level migration runs.
+  it("purges any tokens left in localStorage by an older build", async () => {
+    // Simulate a legacy build that persisted both tokens, then (re)load the
+    // module so its top-level migration purge runs.
+    localStorage.setItem(LOCALSTORAGE_KEYS.authAccessToken, "legacy-access");
     localStorage.setItem(LOCALSTORAGE_KEYS.authRefreshToken, "legacy-refresh");
     vi.resetModules();
     await import("./tokenStore");
 
+    expect(localStorage.getItem(LOCALSTORAGE_KEYS.authAccessToken)).toBeNull();
     expect(localStorage.getItem(LOCALSTORAGE_KEYS.authRefreshToken)).toBeNull();
   });
 });

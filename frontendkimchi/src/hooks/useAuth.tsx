@@ -16,6 +16,7 @@ import {
   type UserPublic,
 } from "../api/auth";
 import { hasSession, subscribe } from "../api/tokenStore";
+import { refreshAccessToken } from "../api/client";
 import { clearUserData } from "../lib/sessionData";
 
 type AuthStatus = "loading" | "authenticated" | "unauthenticated";
@@ -31,32 +32,40 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [status, setStatus] = useState<AuthStatus>(() =>
-    hasSession() ? "loading" : "unauthenticated",
-  );
+  // Start in "loading": the access token is memory-only, so on a fresh page
+  // load we don't yet know if a session exists — an httpOnly refresh cookie may
+  // still be valid. The mount effect resolves this via a silent refresh.
+  const [status, setStatus] = useState<AuthStatus>("loading");
   const [user, setUser] = useState<UserPublic | null>(null);
   const mounted = useRef(true);
 
-  // Validate any stored session once on mount by resolving the current user.
+  // Restore/validate the session once on mount. When there is no in-memory
+  // access token (e.g. right after a reload), attempt a silent refresh first:
+  // the browser still holds the httpOnly refresh cookie, so one /auth/refresh
+  // round-trip re-establishes the session without persisting the access token.
   useEffect(() => {
     mounted.current = true;
-    if (!hasSession()) {
-      setStatus("unauthenticated");
-      return;
-    }
-    fetchCurrentUser()
-      .then((u) => {
+    (async () => {
+      if (!hasSession()) {
+        const refreshed = await refreshAccessToken();
+        if (!refreshed) {
+          if (mounted.current) setStatus("unauthenticated");
+          return;
+        }
+      }
+      try {
+        const u = await fetchCurrentUser();
         if (!mounted.current) return;
         setUser(u);
         setStatus("authenticated");
-      })
-      .catch(() => {
+      } catch {
         if (!mounted.current) return;
         // Invalid/expired session (the client already cleared tokens on a
         // failed refresh). Fall back to the login screen.
         setUser(null);
         setStatus("unauthenticated");
-      });
+      }
+    })();
     return () => {
       mounted.current = false;
     };

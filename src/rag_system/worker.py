@@ -38,9 +38,8 @@ class IngestionWorker:
         # back to the service's configured value, then to 1 (sequential) so test
         # doubles and minimal wiring behave exactly as before.
         if max_concurrency is None:
-            max_concurrency = getattr(
-                getattr(service, "_settings", None), "ingestion_max_concurrency", 1
-            )
+            settings = getattr(service, "settings", None)
+            max_concurrency = getattr(settings, "ingestion_max_concurrency", 1)
         self._max_concurrency = max(1, max_concurrency)
 
     async def process_once(self) -> int:
