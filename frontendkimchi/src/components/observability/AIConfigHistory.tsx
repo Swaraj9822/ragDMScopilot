@@ -62,11 +62,11 @@ export function AIConfigHistory({ configId }: AIConfigHistoryProps) {
     setReason("");
   };
 
-  const closeRollbackDialog = () => {
+  const closeRollbackDialog = useCallback(() => {
     if (rolling) return;
     setRollbackTarget(null);
     setReason("");
-  };
+  }, [rolling]);
 
   const confirmRollback = async () => {
     if (!rollbackTarget || !reason.trim() || reason.length > MAX_REASON_LENGTH) return;
