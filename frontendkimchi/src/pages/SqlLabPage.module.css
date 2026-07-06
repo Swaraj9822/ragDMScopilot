@@ -1,0 +1,337 @@
+/* SqlLabPage — operator-only read-only data explorer (Slice 1, R5/R6). */
+
+.layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+/* ── Body: schema sidebar + main column ── */
+
+.body {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr;
+  gap: var(--space-6);
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .body {
+    grid-template-columns: 1fr;
+  }
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  min-width: 0;
+}
+
+/* ── Schema sidebar (R7.5–R7.7) ── */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.sidebarHeading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sidebarSkeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.sidebarEmpty {
+  font-size: 13px;
+  color: var(--text-muted, var(--text-secondary));
+}
+
+.sidebarError {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--danger);
+}
+
+.tableList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.tableItem {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.tableName {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  word-break: break-all;
+  /* Reset button chrome while keeping the control focusable and operable. */
+  appearance: none;
+  border: none;
+  background: none;
+  padding: var(--space-1);
+  margin: 0;
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+  border-radius: var(--radius-sm, 4px);
+}
+
+.tableName:hover {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.05));
+}
+
+.tableName:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent, #2563eb));
+  outline-offset: 1px;
+}
+
+.columnList {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-left: 1px solid var(--border-default);
+}
+
+.columnItem {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: 12px;
+}
+
+.columnName {
+  color: var(--text-secondary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  word-break: break-all;
+}
+
+.columnType {
+  color: var(--text-muted, var(--text-secondary));
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* ── Editor ── */
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+}
+
+.editorField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.editorLabel {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+
+.textarea {
+  min-height: 140px;
+  resize: vertical;
+  padding: var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+  line-height: 1.5;
+  background: var(--bg-default);
+  color: var(--text-primary);
+  tab-size: 2;
+}
+
+.textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-muted, var(--text-secondary));
+}
+
+.hintWarn {
+  font-size: 12px;
+  color: var(--danger);
+}
+
+/* ── Notices (export blocked / history persist failure) ── */
+
+.notice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* ── Query history (R11.3–R11.5) ── */
+
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+}
+
+.historyHeading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.historyList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.historyItem {
+  display: flex;
+}
+
+.historyButton {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: var(--space-2);
+  margin: 0;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-sm, 4px);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.historyButton:hover {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.05));
+  color: var(--text-primary);
+}
+
+.historyButton:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent, #2563eb));
+  outline-offset: 1px;
+}
+
+.spinner {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── Results ── */
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.resultMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.resultMeta strong {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.truncationBanner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--warning-soft, var(--accent-soft));
+  border: 1px solid var(--warning, var(--accent));
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+/* ── Loading skeleton block ── */
+
+.skeletonBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* ── Auto-dashboard analyze affordance (Slice 4) ── */
+
+.analyzeBar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
