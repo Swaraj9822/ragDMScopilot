@@ -18,6 +18,9 @@ const ObservabilityPage = isTest
 const DocumentsPage = isTest
   ? (await import("../pages/DocumentsPage")).default
   : lazy(() => import("../pages/DocumentsPage"));
+const SqlLabPage = isTest
+  ? (await import("../pages/SqlLabPage")).default
+  : lazy(() => import("../pages/SqlLabPage"));
 const EvaluationPage = isTest
   ? (await import("../pages/EvaluationPage")).default
   : lazy(() => import("../pages/EvaluationPage"));
@@ -72,6 +75,7 @@ export function App() {
           <Route path="/copilot" element={<CopilotPage />} />
           <Route path="/observability" element={<ObservabilityPage />} />
           <Route path="/documents" element={<DocumentsPage />} />
+          <Route path="/sql-lab" element={<SqlLabPage />} />
           <Route path="/evaluation" element={<EvaluationPage />} />
           <Route path="/feedback" element={<FeedbackInboxPage />} />
           <Route path="/replay" element={<ReplayLabPage />} />

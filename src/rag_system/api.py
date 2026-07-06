@@ -100,6 +100,7 @@ from rag_system.clarification import (
     ClarificationStore,
 )
 from rag_system.service import DocumentVersionNotFoundError, RagService
+from rag_system.sql_lab.router import router as sql_lab_router
 
 setup_logging()
 logger = get_logger(__name__)
@@ -166,6 +167,10 @@ app.add_middleware(
 
 # Authentication endpoints (/auth/register, /auth/login, /auth/me).
 app.include_router(auth_router)
+
+# SQL Lab endpoints (operator-only read-only data explorer): POST /sql/run,
+# GET /sql/schema.
+app.include_router(sql_lab_router)
 
 
 @lru_cache

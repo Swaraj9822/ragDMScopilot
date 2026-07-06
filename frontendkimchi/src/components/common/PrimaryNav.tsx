@@ -1,6 +1,7 @@
 import { NavLink } from "react-router-dom";
 import {
   Activity,
+  Database,
   Files,
   FlaskConical,
   Gauge,
@@ -22,6 +23,7 @@ const TABS: Tab[] = [
   { to: "/copilot", label: "Copilot", Icon: MessageSquareText },
   { to: "/observability", label: "AI Observability", Icon: Activity },
   { to: "/documents", label: "Documents", Icon: Files },
+  { to: "/sql-lab", label: "SQL Lab", Icon: Database, operatorOnly: true },
   { to: "/evaluation", label: "Evaluation", Icon: Gauge, operatorOnly: true },
   { to: "/feedback", label: "Feedback", Icon: Inbox, operatorOnly: true },
   { to: "/replay", label: "Replay Lab", Icon: FlaskConical, operatorOnly: true },

@@ -146,6 +146,91 @@ class Settings(BaseSettings):
         alias="COPILOT_STATEMENT_TIMEOUT_MS",
     )
 
+    # --- SQL Lab (operator-only read-only data explorer) ---
+    # SQL Lab authenticates with a dedicated read-only Postgres role (the
+    # primary security boundary) while reusing the COPILOT_DB_* host/port/name/
+    # sslmode endpoint. Only the user/password differ; see require_sql_viewer_
+    # credentials() below and SqlLabExecutor.
+    sql_viewer_db_user: str | None = Field(default=None, alias="SQL_VIEWER_DB_USER")
+    sql_viewer_db_password: str | None = Field(
+        default=None, alias="SQL_VIEWER_DB_PASSWORD"
+    )
+    sql_lab_row_limit: int = Field(default=100, alias="SQL_LAB_ROW_LIMIT")
+    sql_lab_statement_timeout_ms: int = Field(
+        default=10_000, alias="SQL_LAB_STATEMENT_TIMEOUT_MS"
+    )
+    # Comma-separated denylist enforced by the SQL_Guard (secondary guardrail);
+    # defaults cover the auth tables holding bcrypt hashes / refresh tokens.
+    sql_lab_sensitive_tables: str = Field(
+        default="users,refresh_tokens", alias="SQL_LAB_SENSITIVE_TABLES"
+    )
+    # Auto-dashboard analysis model ids (Slice 4). Defaults follow the repo's
+    # existing conventions: generation → Flash, reasoning/judge → Pro.
+    sql_lab_analysis_model_id: str = Field(
+        default="gemini-3.5-flash", alias="SQL_LAB_ANALYSIS_MODEL_ID"
+    )
+    sql_lab_deep_analysis_model_id: str = Field(
+        default="gemini-3.1-pro", alias="SQL_LAB_DEEP_ANALYSIS_MODEL_ID"
+    )
+
+    @field_validator("sql_lab_row_limit")
+    @classmethod
+    def _validate_sql_lab_row_limit(cls, value: int) -> int:
+        """Row_Limit must be an integer within [1, 10000] inclusive (R1.7, R1.9)."""
+        if value < 1 or value > 10_000:
+            raise ValueError(
+                f"invalid SQL_LAB_ROW_LIMIT {value!r}: must be within 1 and "
+                "10000 inclusive"
+            )
+        return value
+
+    @field_validator("sql_lab_statement_timeout_ms")
+    @classmethod
+    def _validate_sql_lab_statement_timeout_ms(cls, value: int) -> int:
+        """Statement_Timeout must be within [1, 60000] ms inclusive (R1.8, R1.9)."""
+        if value < 1 or value > 60_000:
+            raise ValueError(
+                f"invalid SQL_LAB_STATEMENT_TIMEOUT_MS {value!r}: must be within "
+                "1 and 60000 inclusive"
+            )
+        return value
+
+    @property
+    def sql_lab_sensitive_tables_set(self) -> frozenset[str]:
+        """Normalized (stripped, lowercased) set of denylisted sensitive tables."""
+        return frozenset(
+            name.strip().lower()
+            for name in self.sql_lab_sensitive_tables.split(",")
+            if name.strip()
+        )
+
+    def require_sql_viewer_credentials(self) -> tuple[str, str]:
+        """Return the (user, password) viewer credentials or raise a keyed error.
+
+        Raises ``SqlLabConfigError`` naming the missing environment key(s) when
+        either credential is absent, and never includes the (secret) value in
+        the message (R1.5).
+        """
+        # Imported lazily: ``config`` is a foundational module imported during
+        # the import of ``sql_lab.guard`` (via ``copilot``), so importing the
+        # ``sql_lab`` package at module top would create an initialization cycle
+        # (config -> sql_lab package __init__ -> guard -> copilot -> config).
+        from rag_system.sql_lab.errors import SqlLabConfigError
+
+        missing = [
+            name
+            for name, value in (
+                ("SQL_VIEWER_DB_USER", self.sql_viewer_db_user),
+                ("SQL_VIEWER_DB_PASSWORD", self.sql_viewer_db_password),
+            )
+            if not value
+        ]
+        if missing:
+            raise SqlLabConfigError(
+                f"Missing SQL Lab configuration: {', '.join(missing)}"
+            )
+        return self.sql_viewer_db_user, self.sql_viewer_db_password  # type: ignore[return-value]
+
     # --- Hybrid synthesis ---
     # The hybrid route runs RAG and the database copilot, then optionally makes
     # one more LLM call to merge the two answers (~3s on the critical path).
