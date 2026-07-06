@@ -127,7 +127,16 @@ class ChartSpecAnalyzer:
         client: SqlLabGeminiClient | None = None,
     ) -> None:
         self._settings = settings
-        self._client = client or SqlLabGeminiClient(settings)
+        # The Gemini client is built lazily on the first ``analyze`` call rather
+        # than here. Constructing it eagerly means a missing ``google-genai``
+        # dependency or absent GCP configuration raises ``RuntimeError`` while
+        # FastAPI is *resolving the route dependency* — before the route body's
+        # try/except runs — surfacing as an uncaught ``500`` instead of the
+        # intended R9.10 "analysis could not be completed" response. Deferring
+        # construction into ``analyze`` lets that failure be mapped to
+        # :class:`SqlLabAnalysisError` (→ ``503``). An injected client (tests) is
+        # used as-is and never re-constructed.
+        self._client = client
 
     def analyze(self, result: Any, mode: AnalysisMode = "default") -> ChartSpec:
         """Analyze ``result`` and return a validated declarative Chart_Spec.
@@ -148,7 +157,8 @@ class ChartSpecAnalyzer:
         payload = self._build_payload(result)
 
         try:
-            raw = self._client.generate_chart_spec_json(payload, mode)
+            client = self._resolve_client()
+            raw = client.generate_chart_spec_json(payload, mode)
         except Exception as exc:  # noqa: BLE001 - map any client failure to R9.10
             raise SqlLabAnalysisError(
                 "Analysis could not be completed: the analysis model is "
@@ -158,6 +168,20 @@ class ChartSpecAnalyzer:
         # Schema validation (R9.5). ChartSpecValidationError propagates for the
         # route to map to R9.6, leaving the source Result_Set unchanged.
         return validate_chart_spec(raw)
+
+    def _resolve_client(self) -> SqlLabGeminiClient:
+        """Return the injected client or lazily construct one from settings.
+
+        Called inside :meth:`analyze`'s try/except so that a construction
+        failure — a missing ``google-genai`` dependency or absent GCP
+        configuration raised by :class:`SqlLabGeminiClient` — is mapped to
+        :class:`~rag_system.sql_lab.errors.SqlLabAnalysisError` (R9.10) rather
+        than escaping as an uncaught error during dependency resolution. A
+        successfully built client is cached for subsequent calls.
+        """
+        if self._client is None:
+            self._client = SqlLabGeminiClient(self._settings)
+        return self._client
 
     def _build_payload(self, result: Any) -> str:
         """Assemble the compact, bounded prompt payload sent to the model.
