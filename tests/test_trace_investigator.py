@@ -193,7 +193,7 @@ def test_identified_cause_returns_recommendations_and_analyzed_elements() -> Non
     assert set(diagnosis.analyzed_elements) <= {
         "route",
         "retrieval_scores",
-        "rerank_order",
+        "retrieval_order",
         "generation_outcome",
     }
     # R10.5: 1..10 recommendations, each targeting ai_configuration or corpus.
@@ -333,7 +333,7 @@ def test_parse_diagnosis_handles_markdown_fenced_json() -> None:
 
 
 def test_available_elements_reflects_recorded_trace() -> None:
-    # Route is always available; multiple hits expose rerank order; claims or an
+    # Route is always available; multiple hits expose retrieval order; claims or an
     # abstention or an answer expose the generation outcome.
     trace = _trace(
         claims=[
@@ -348,7 +348,7 @@ def test_available_elements_reflects_recorded_trace() -> None:
     elements = _available_elements(trace)
     assert "route" in elements
     assert "retrieval_scores" in elements
-    assert "rerank_order" in elements
+    assert "retrieval_order" in elements
     assert "generation_outcome" in elements
 
 

@@ -130,7 +130,6 @@ def _service(store: CasStore, index: VersionedFakeIndex | None = None) -> RagSer
     service._embedder = FakeEmbedder()
     service._sparse_encoder = None
     service._index = index or VersionedFakeIndex()
-    service._reranker = None
     service._generator = None
     return service
 

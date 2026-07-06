@@ -43,7 +43,7 @@ def _utcnow() -> str:
 
 
 class JsonStore(Protocol):
-    """The slice of :class:`S3ArtifactStore` this module needs."""
+    """The slice of :class:`GcsArtifactStore` this module needs."""
 
     def get_json(self, key: str) -> object | None: ...
 
@@ -186,6 +186,11 @@ class ConversationManager:
             if candidate and candidate != request.question.strip():
                 standalone = candidate
                 rewritten = True
+                logger.info(
+                    "Question rewritten: %r -> %r",
+                    request.question,
+                    standalone,
+                )
             metrics.increment(
                 "rag_conversation_rewrites_total",
                 {"rewritten": "true" if rewritten else "false"},

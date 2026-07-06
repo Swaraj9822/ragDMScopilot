@@ -332,7 +332,7 @@ def setup_logging(level: str | None = None) -> None:
     root.addHandler(handler)
 
     # Reduce noise from chatty libraries
-    for noisy in ("boto3", "botocore", "urllib3", "pinecone", "httpx", "httpcore"):
+    for noisy in ("google", "urllib3", "pinecone", "httpx", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 

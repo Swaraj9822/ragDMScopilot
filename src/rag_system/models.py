@@ -675,7 +675,6 @@ class AIConfigurationVersion(BaseModel):
     output_schema: dict[str, Any] = Field(default_factory=dict)
     router_threshold: float
     retrieval_settings: dict[str, Any] = Field(default_factory=dict)
-    reranker_config: dict[str, Any] = Field(default_factory=dict)
     change_description: str = Field(min_length=1, max_length=500)
     created_at: str
     approved: bool = False
@@ -710,7 +709,6 @@ class AIConfigCreateRequest(BaseModel):
     change_description: str = Field(min_length=1, max_length=500)
     output_schema: dict[str, Any] | None = None
     retrieval_settings: dict[str, Any] | None = None
-    reranker_config: dict[str, Any] | None = None
 
 
 class AIConfigRollbackRequest(BaseModel):
@@ -734,7 +732,7 @@ class TraceDiagnosis(BaseModel):
     trace_id: str
     cause_description: str
     analyzed_elements: list[
-        Literal["route", "retrieval_scores", "rerank_order", "generation_outcome"]
+        Literal["route", "retrieval_scores", "retrieval_order", "generation_outcome"]
     ] = Field(default_factory=list)
     #: 0 when no cause, else 1..10.
     recommendations: list[Recommendation] = Field(default_factory=list)

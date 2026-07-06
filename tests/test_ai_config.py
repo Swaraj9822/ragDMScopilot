@@ -69,10 +69,10 @@ class _FakeStore:
         self.objects[key] = (payload, self._next_etag())
 
     # Bind the real, store-agnostic helper implementations.
-    from rag_system.storage import S3ArtifactStore
+    from rag_system.storage import GcsArtifactStore
 
-    create_json = S3ArtifactStore.create_json
-    update_json_cas = S3ArtifactStore.update_json_cas
+    create_json = GcsArtifactStore.create_json
+    update_json_cas = GcsArtifactStore.update_json_cas
 
 
 def _make_version(
@@ -278,7 +278,7 @@ def test_approve_version_sets_approval_fields() -> None:
 
 def test_approve_version_does_not_mutate_governed_settings() -> None:
     """Approval must NOT mutate prompt, model, output_schema, router_threshold,
-    retrieval_settings, or reranker_config (task 15.10 spec)."""
+    or retrieval_settings (task 15.10 spec)."""
     store = AIConfigurationStore(_FakeStore())
     original = _make_version(
         store,
@@ -295,7 +295,6 @@ def test_approve_version_does_not_mutate_governed_settings() -> None:
     assert approved.router_threshold == original.router_threshold
     assert approved.output_schema == original.output_schema
     assert approved.retrieval_settings == original.retrieval_settings
-    assert approved.reranker_config == original.reranker_config
     assert approved.change_description == original.change_description
     assert approved.version_id == original.version_id
     assert approved.config_id == original.config_id

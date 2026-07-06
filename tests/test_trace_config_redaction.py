@@ -72,7 +72,7 @@ class TestRedactSettings:
         assert result["model"] == "gemini-3.5-flash"
 
     def test_redacts_nested_sensitive_keys(self) -> None:
-        """Sensitive keys nested inside retrieval_settings / reranker_config are redacted."""
+        """Sensitive keys nested inside settings sub-dicts are redacted."""
         source = {
             "prompt": "answer questions",
             "retrieval_settings": {
@@ -83,9 +83,9 @@ class TestRedactSettings:
                     "count": 5,
                 },
             },
-            "reranker_config": {
-                "rerank_top_k": 10,
-                "auth_token": "rerank-token",
+            "extra_settings": {
+                "context_top_k": 10,
+                "auth_token": "extra-token",
             },
         }
         result = redact_settings(source)
@@ -94,8 +94,8 @@ class TestRedactSettings:
         assert result["retrieval_settings"]["provider_api_key"] == REDACTED_PLACEHOLDER
         assert result["retrieval_settings"]["nested"]["deep_secret"] == REDACTED_PLACEHOLDER
         assert result["retrieval_settings"]["nested"]["count"] == 5
-        assert result["reranker_config"]["rerank_top_k"] == 10
-        assert result["reranker_config"]["auth_token"] == REDACTED_PLACEHOLDER
+        assert result["extra_settings"]["context_top_k"] == 10
+        assert result["extra_settings"]["auth_token"] == REDACTED_PLACEHOLDER
 
     def test_case_insensitive_matching(self) -> None:
         """Pattern matching is case-insensitive."""
@@ -146,7 +146,6 @@ class TestBuildTraceConfigPayload:
             output_schema={"type": "object"},
             router_threshold=0.5,
             retrieval_settings={"top_k": 20, "provider_api_key": "real-key"},
-            reranker_config={"enabled": True, "service_secret": "s3cr3t"},
             is_resolved=True,
         )
         payload = build_trace_config_payload(rc)
@@ -159,8 +158,6 @@ class TestBuildTraceConfigPayload:
         assert settings["router_threshold"] == 0.5
         assert settings["retrieval_settings"]["top_k"] == 20
         assert settings["retrieval_settings"]["provider_api_key"] == REDACTED_PLACEHOLDER
-        assert settings["reranker_config"]["enabled"] is True
-        assert settings["reranker_config"]["service_secret"] == REDACTED_PLACEHOLDER
 
     def test_resolved_config_source_not_mutated(self) -> None:
         """build_trace_config_payload never mutates the source ResolvedConfig."""
@@ -172,7 +169,6 @@ class TestBuildTraceConfigPayload:
             output_schema={},
             router_threshold=0.5,
             retrieval_settings={"api_key_value": "original"},
-            reranker_config={},
             is_resolved=True,
         )
         build_trace_config_payload(rc)
@@ -387,7 +383,6 @@ class TestSerializerConfigRoundTrip:
                 "prompt": "answer",
                 "model": "gemini-3.1-pro",
                 "retrieval_settings": {"top_k": 20},
-                "reranker_config": {"enabled": True},
             },
         )
         serializer = TraceSerializer()

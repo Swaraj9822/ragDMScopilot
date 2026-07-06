@@ -29,13 +29,10 @@ from rag_system.worker import IngestionWorker
 class FakeSettings:
     max_upload_bytes = 1024
     sparse_enabled = False
-    rerank_enabled = False
-    rerank_top_k = 12
+    context_top_k = 12
     retrieval_dense_top_k = 10
     low_top_score_threshold = None
-    bedrock_embedding_model_id = "fake-embedder"
     embedding_model_id = "fake-embedder"
-    s3_bucket = "bucket"
     gcs_bucket = "bucket"
     pinecone_index_name = "fake-index"
 
@@ -359,7 +356,6 @@ def _service(store: IntegrationStore, queue: IntegrationQueue, index: Integratio
     service._embedder = IntegrationEmbedder()
     service._sparse_encoder = None
     service._index = index
-    service._reranker = None
     service._generator = IntegrationGenerator()
     return service
 

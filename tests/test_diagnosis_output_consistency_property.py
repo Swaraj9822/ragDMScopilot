@@ -9,7 +9,7 @@ Feature: rag-trust-and-observability.
 
 *For any* diagnosis of a recorded Trace: when a cause is identified, the cause
 description references at least one of the analyzed elements (route, retrieval
-scores, rerank order, generation outcome) and the diagnosis returns between 1
+scores, retrieval order, generation outcome) and the diagnosis returns between 1
 and 10 recommended changes, each referencing the ``AI_Configuration`` or the
 ``Corpus``; and when no cause is determined, the diagnosis indicates so and
 returns zero recommended changes.
@@ -54,7 +54,7 @@ def _settings() -> Settings:
     return Settings(**_REQUIRED_BY_ALIAS)  # type: ignore[arg-type]
 
 
-_ANALYZED_ELEMENTS = ["route", "retrieval_scores", "rerank_order", "generation_outcome"]
+_ANALYZED_ELEMENTS = ["route", "retrieval_scores", "retrieval_order", "generation_outcome"]
 _TARGETS = ["ai_configuration", "corpus"]
 
 
@@ -202,7 +202,7 @@ def test_identified_cause_references_analyzed_element_and_has_bounded_recommenda
     trace: QueryTraceRecord, response: str
 ) -> None:
     """When a cause is determined, the description references at least one
-    analyzed element (route, retrieval scores, rerank order, generation outcome)
+    analyzed element (route, retrieval scores, retrieval order, generation outcome)
     and between 1 and 10 recommendations are returned.
 
     **Validates: Requirements 10.1, 10.3, 10.4, 10.5**

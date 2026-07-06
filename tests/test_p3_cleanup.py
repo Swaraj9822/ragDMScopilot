@@ -112,16 +112,14 @@ def _stream_service() -> tuple[RagService, _Index]:
     service = object.__new__(RagService)
     service._settings = SimpleNamespace(
         sparse_enabled=False,
-        rerank_enabled=False,
         retrieval_dense_top_k=10,
-        rerank_top_k=5,
+        context_top_k=5,
         low_top_score_threshold=None,
     )
     index = _Index()
     service._embedder = _Embedder()
     service._sparse_encoder = None
     service._index = index
-    service._reranker = None
     service._generator = _Generator()
     # The retrieval gate consults the document record for its published version;
     # cache an indexed record so the fake hit (version "v") is kept.

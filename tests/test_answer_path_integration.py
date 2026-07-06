@@ -42,7 +42,7 @@ from rag_system.router import AgenticRouter, QueryRoute, RoutingDecision
 
 
 class FakeStore:
-    """In-memory fake for S3ArtifactStore / JsonStore."""
+    """In-memory fake for GcsArtifactStore / JsonStore."""
 
     def __init__(self) -> None:
         self.objects: dict[str, object] = {}

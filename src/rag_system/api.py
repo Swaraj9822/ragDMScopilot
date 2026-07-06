@@ -182,7 +182,7 @@ def get_copilot_service() -> DatabaseCopilotService:
 def get_conversations() -> ConversationManager:
     """Server-side multi-turn conversation store + follow-up rewriter.
 
-    Shares the RAG service's S3 artifact store so conversations live alongside
+    Shares the RAG service's GCS artifact store so conversations live alongside
     documents and query traces in the same bucket.
     """
     return ConversationManager(store=get_service().artifact_store, settings=get_settings())
@@ -1235,11 +1235,11 @@ def _get_replay_service():
 
 
 def _get_artifact_store():
-    """Return the shared S3ArtifactStore."""
-    from rag_system.storage import S3ArtifactStore
+    """Return the shared GcsArtifactStore."""
+    from rag_system.storage import GcsArtifactStore
 
     settings = get_settings()
-    return S3ArtifactStore(settings)
+    return GcsArtifactStore(settings)
 
 
 @app.post(
@@ -1738,7 +1738,6 @@ def create_ai_config_version(
             change_description=body.change_description,
             output_schema=body.output_schema,
             retrieval_settings=body.retrieval_settings,
-            reranker_config=body.reranker_config,
         )
     except ChangeDescriptionRequiredError:
         raise HTTPException(status_code=400, detail="change_description_required")
@@ -1804,8 +1803,8 @@ def approve_ai_config_version(
 
     Operator-only. Sets approved=True, records the approver identity and
     approval timestamp. Approval does NOT mutate the version's governed settings
-    (prompt, model, output_schema, router_threshold, retrieval_settings,
-    reranker_config). Unknown version → 404 ``configuration_version_not_found``.
+    (prompt, model, output_schema, router_threshold, retrieval_settings).
+    Unknown version → 404 ``configuration_version_not_found``.
     """
     from rag_system.ai_config import ConfigurationVersionNotFoundError
 
@@ -1847,7 +1846,7 @@ def _get_trace_investigator():
 def diagnose_trace(trace_id: str) -> TraceDiagnosis:
     """Diagnose a recorded query trace (R10.1, R10.6).
 
-    Operator-only. Loads the enriched query trace, analyzes route/retrieval/rerank/
+    Operator-only. Loads the enriched query trace, analyzes route/retrieval/order/
     generation outcome, and returns read-only recommendations. No mutations are
     applied to the trace or any other state (R10.7).
 

@@ -65,10 +65,10 @@ class _FakeStore:
                 raise PreconditionFailed(key)
         self.objects[key] = (payload, self._next_etag())
 
-    from rag_system.storage import S3ArtifactStore
+    from rag_system.storage import GcsArtifactStore
 
-    create_json = S3ArtifactStore.create_json
-    update_json_cas = S3ArtifactStore.update_json_cas
+    create_json = GcsArtifactStore.create_json
+    update_json_cas = GcsArtifactStore.update_json_cas
 
 
 def _make_store_and_resolver() -> tuple[AIConfigurationStore, AIConfigResolver]:
@@ -95,7 +95,6 @@ def test_resolve_returns_active_version_settings() -> None:
         router_threshold=0.7,
         change_description="custom config",
         retrieval_settings={"retrieval_dense_top_k": 40},
-        reranker_config={"rerank_top_k": 8, "rerank_enabled": True},
         output_schema={"type": "object"},
         version_id="v-active",
     )
@@ -112,7 +111,6 @@ def test_resolve_returns_active_version_settings() -> None:
     assert resolved.model == "gemini-3.1-pro"
     assert resolved.router_threshold == 0.7
     assert resolved.retrieval_settings == {"retrieval_dense_top_k": 40}
-    assert resolved.reranker_config == {"rerank_top_k": 8, "rerank_enabled": True}
     assert resolved.output_schema == {"type": "object"}
 
 
@@ -158,9 +156,6 @@ def test_resolve_bootstraps_default_when_no_active_version() -> None:
     # Retrieval settings populated from config defaults.
     assert "retrieval_dense_top_k" in resolved.retrieval_settings
     assert "retrieval_score_threshold" in resolved.retrieval_settings
-    # Reranker config populated from config defaults.
-    assert "rerank_top_k" in resolved.reranker_config
-    assert "rerank_enabled" in resolved.reranker_config
 
     # The version should now be persisted and active.
     index = config_store.get_index("cfg")
@@ -263,7 +258,6 @@ def test_resolved_config_from_version() -> None:
         output_schema={"k": "v"},
         router_threshold=0.8,
         retrieval_settings={"a": 1},
-        reranker_config={"b": 2},
         change_description="test",
         created_at="2024-01-01T00:00:00+00:00",
     )
@@ -275,7 +269,6 @@ def test_resolved_config_from_version() -> None:
     assert rc.output_schema == {"k": "v"}
     assert rc.router_threshold == 0.8
     assert rc.retrieval_settings == {"a": 1}
-    assert rc.reranker_config == {"b": 2}
     assert rc.is_resolved is True
 
 
@@ -289,5 +282,4 @@ def test_resolved_config_unresolved() -> None:
     assert rc.model == "gemini-3.5-flash"
     assert rc.router_threshold == 0.5
     assert rc.retrieval_settings == {}
-    assert rc.reranker_config == {}
     assert rc.output_schema == {}

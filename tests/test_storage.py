@@ -152,10 +152,10 @@ class _FakeStore:
         self.objects[key] = (payload, self._next_etag())
 
     # Bind the real, store-agnostic helper implementations.
-    from rag_system.storage import S3ArtifactStore
+    from rag_system.storage import GcsArtifactStore
 
-    create_json = S3ArtifactStore.create_json
-    update_json_cas = S3ArtifactStore.update_json_cas
+    create_json = GcsArtifactStore.create_json
+    update_json_cas = GcsArtifactStore.update_json_cas
 
 
 def test_create_json_writes_when_absent_and_rejects_second_write() -> None:

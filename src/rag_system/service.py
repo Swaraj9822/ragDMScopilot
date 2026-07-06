@@ -39,7 +39,6 @@ from rag_system.observability import (
 from rag_system.observability_tracing import get_active_trace_id, record_query_summary
 from rag_system.parsing import DocumentParserRouter
 from rag_system.queue import IngestionJob, PubSubIngestionQueue
-from rag_system.rerank import BedrockCohereReranker
 from rag_system.retrieval import PineconeHybridIndex
 from rag_system.sparse import BM25SparseEncoder
 from rag_system.storage import (
@@ -136,7 +135,7 @@ class StaleIngestionError(RuntimeError):
 
 # Bounded pool for best-effort, off-request-path query-trace persistence. A
 # fixed worker count caps concurrent background writes instead of spawning one
-# unbounded thread per query under load; trace writes are short S3 puts, so a
+# unbounded thread per query under load; trace writes are short GCS puts, so a
 # small pool drains them quickly. Threads are daemon so they never hold up
 # process exit beyond a brief drain.
 _TRACE_PERSIST_EXECUTOR = ThreadPoolExecutor(
@@ -154,15 +153,11 @@ class RagService:
         self._embedder: GeminiEmbedder | None = None
         self._sparse_encoder: BM25SparseEncoder | None = None
         self._index: PineconeHybridIndex | None = None
-        self._reranker: BedrockCohereReranker | None = None
         self._generator: GroundedAnswerGenerator | None = None
         self._documents: dict[str, DocumentRecord] = {}
         # Shared pool for the Documents-tab listing fan-out (created lazily).
         self._document_list_executor: ThreadPoolExecutor | None = None
-        logger.info(
-            "RagService initialised (rerank=%s)",
-            "enabled" if settings.rerank_enabled else "disabled",
-        )
+        logger.info("RagService initialised")
 
     @property
     def settings(self) -> Settings:
@@ -212,14 +207,6 @@ class RagService:
         if self._index is None:
             self._index = PineconeHybridIndex(self._settings)
         return self._index
-
-    @property
-    def reranker(self) -> BedrockCohereReranker | None:
-        if not self._settings.rerank_enabled:
-            return None
-        if self._reranker is None:
-            self._reranker = BedrockCohereReranker(self._settings)
-        return self._reranker
 
     @property
     def generator(self) -> GroundedAnswerGenerator:
@@ -281,7 +268,7 @@ class RagService:
         # existing vectors stay searchable while the new version ingests. A
         # brand-new document has no prior record and therefore no active version.
         # The lookup is skipped for write-only stores (minimal test doubles);
-        # real S3 always supports reads, and a fresh upload has nothing to carry.
+        # real GCS always supports reads, and a fresh upload has nothing to carry.
         existing = None
         if hasattr(self._store, "get_json"):
             existing = await asyncio.to_thread(self.get_document, document_id)
@@ -917,7 +904,7 @@ class RagService:
     def _create_artifact(self, key: str, payload: object) -> None:
         """Create-only write of an immutable artifact.
 
-        Uses the store's create-only primitive when available (real S3 and
+        Uses the store's create-only primitive when available (real GCS and
         CAS-capable doubles), degrading to a plain ``put_json`` for the minimal
         write-only doubles used in some tests. A :class:`PreconditionFailed`
         (the key already exists) is swallowed so create-only writes are
@@ -1001,7 +988,7 @@ class RagService:
         payload = self._store.get_json(document_record_key(document_id))
         if payload is None:
             # No canonical record in the store; fall back to any cached copy.
-            # Tradeoff: if another process deleted the record (removing the S3
+            # Tradeoff: if another process deleted the record (removing the
             # object) this can briefly serve a stale non-deleted cached copy
             # until the cache entry is replaced. That is acceptable here —
             # deletes also write a terminal `deleted` record (see
@@ -1013,7 +1000,7 @@ class RagService:
         record = DocumentRecord.model_validate(payload)
         self._documents[document_id] = record
         logger.info(
-            "Loaded document record from S3",
+            "Loaded document record from GCS",
             extra={"document_id": document_id, "version": record.version},
         )
         return record
@@ -1021,7 +1008,7 @@ class RagService:
     def list_documents(self) -> list[DocumentRecord]:
         """Return all document records ordered by title ascending.
 
-        Records live one-per-key in S3, so the listing fans the per-document
+        Records live one-per-key in the artifact store, so the listing fans the per-document
         reads out across a bounded thread pool rather than issuing them one at a
         time (an N+1 that made the Documents tab scale linearly with the corpus).
         """
@@ -1098,7 +1085,7 @@ class RagService:
           write is exempt because that is how a fresh upload introduces the new
           version.
 
-        When the store supports compare-and-set (real S3 via ETags) the check
+        When the store supports compare-and-set (real GCS via ETags) the check
         and write are atomic: we read the current ETag, verify the invariants,
         then write conditionally, retrying on conflict. Stores without CAS (the
         in-memory test doubles, which are single-threaded and never actually
@@ -1111,7 +1098,7 @@ class RagService:
         if not supports_cas:
             # No compare-and-set primitive. Best-effort read-then-write guard
             # when the store can be read; a write-only store (some minimal test
-            # doubles) simply writes as before. Real S3 always takes the CAS
+            # doubles) simply writes as before. Real GCS always takes the CAS
             # branch below, so production never relies on this fallback.
             if hasattr(self._store, "get_json"):
                 self._reject_illegal_write(record, self._store.get_json(key))
@@ -1204,7 +1191,7 @@ class RagService:
     # ------------------------------------------------------------------
 
     def _feedback_key_for(self, feedback_id: str) -> str | None:
-        """Resolve the full S3 key for a feedback record by its id, or ``None``."""
+        """Resolve the full storage key for a feedback record by its id, or ``None``."""
         suffix = f"/feedback/{feedback_id}.json"
         for key in self._store.list_feedback_record_keys():
             if key.endswith(suffix):
@@ -1556,11 +1543,11 @@ class RagService:
         retrieval_mode: str,
         log_extra: dict[str, Any],
     ) -> list[RetrievalHit]:
-        """Embed, retrieve, and rerank for a query; return the top hits.
+        """Embed, retrieve, and trim to the top context hits for a query.
 
         This is the retrieval half of the pipeline shared by :meth:`query` and
         :meth:`query_stream`. Keeping it in one place ensures retrieval tuning
-        (embedding, sparse encoding, top-k, rerank) cannot drift between the
+        (embedding, sparse encoding, top-k) cannot drift between the
         batch and streaming code paths. Span recording is threaded through the
         caller's ``recorder`` so each path attributes the spans to its own trace.
         """
@@ -1614,14 +1601,8 @@ class RagService:
         )
         self._observe_retrieval_quality(hits, retrieval_mode, log_extra)
 
-        # Reranking is optional — controlled by RAG_RERANK_ENABLED
-        reranker = self.reranker
-        if reranker:
-            with recorder.record_span("reranking"):
-                top_hits = reranker.rerank(request.question, hits)
-            logger.info("Reranked to %d hits", len(top_hits), extra=log_extra)
-        else:
-            top_hits = hits[: self._settings.rerank_top_k]
+        # Trim the hybrid candidate set to the final context window.
+        top_hits = hits[: self._settings.context_top_k]
         return top_hits
 
     def query(self, request: QueryRequest) -> QueryResponse:
@@ -1653,7 +1634,7 @@ class RagService:
 
         latency_ms = (time.perf_counter() - query_start) * 1000
         # Persist the trace off the response path — it's observability only and
-        # the S3 write can add seconds the caller shouldn't have to wait for.
+        # the GCS write can add seconds the caller shouldn't have to wait for.
         self._persist_query_trace_async(
             request=request,
             response=response,
@@ -1718,10 +1699,10 @@ class RagService:
         yield {"type": "final", "response": response}
 
     def _persist_query_trace_async(self, **kwargs: Any) -> None:
-        """Write the query trace to S3 on a bounded background pool.
+        """Write the query trace to the artifact store on a bounded background pool.
 
         Trace persistence is best-effort observability, so a slow or failing
-        S3 write never blocks or fails the user-facing query. The request's
+        GCS write never blocks or fails the user-facing query. The request's
         trace-id context is copied so background logs stay correlated. The work
         runs on a shared, size-bounded executor rather than a freshly spawned
         thread, so a burst of queries cannot create an unbounded number of
@@ -1877,8 +1858,6 @@ class RagService:
         }
         if getattr(self._settings, "sparse_enabled", False):
             model_ids["sparse"] = "bm25-msmarco-default"
-        if getattr(self._settings, "rerank_enabled", False):
-            model_ids["rerank"] = getattr(self._settings, "bedrock_rerank_model_id", None)
         return {key: str(value) for key, value in model_ids.items() if value}
 
 

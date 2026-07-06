@@ -199,7 +199,6 @@ def _service(
     service._embedder = embedder if embedder is not None else FakeEmbedder()
     service._sparse_encoder = None
     service._index = index
-    service._reranker = None
     service._generator = None
     return service
 

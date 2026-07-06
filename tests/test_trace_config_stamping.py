@@ -98,7 +98,7 @@ def test_stamp_trace_config_redacts_secrets(stamping_env):
     api_module._stamp_trace_config(object())
 
     settings = recorder.calls[0]["resolved_settings"]
-    # The bootstrapped default carries retrieval/reranker settings; ensure no
+    # The bootstrapped default carries retrieval settings; ensure no
     # obviously-secret key leaks a raw value (the payload builder redacts).
     flat = str(settings).lower()
     assert "secret" not in flat or "***" in flat

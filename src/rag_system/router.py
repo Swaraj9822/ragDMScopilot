@@ -72,7 +72,7 @@ class RoutingDecision(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class BedrockQueryClassifier:
+class LlmQueryClassifier:
     """Uses the configured LLM provider to classify a query into a routing category."""
 
     def __init__(self, settings: Settings):
@@ -140,7 +140,7 @@ class AgenticRouter:
         self._settings = settings
         self._llm = build_text_llm(settings)
         self._model_id = self._llm.model_id
-        self._classifier = BedrockQueryClassifier(settings)
+        self._classifier = LlmQueryClassifier(settings)
         self._rag = rag_service
         self._copilot = copilot_service
         self._copilot_available = copilot_service is not None

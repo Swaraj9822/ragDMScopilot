@@ -1,4 +1,4 @@
-"""One-off helper: upload a local PDF to S3 and enqueue it for ingestion."""
+"""One-off helper: upload a local PDF to the artifact store and enqueue it for ingestion."""
 
 import asyncio
 import sys

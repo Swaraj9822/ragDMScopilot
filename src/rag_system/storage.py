@@ -25,7 +25,7 @@ class GcsArtifactStore:
     passes ``if_generation_match=0`` (succeeds only if the object does not yet
     exist) and a compare-and-set write passes the generation observed at read
     time. The generation is surfaced to callers through :meth:`get_json_with_etag`
-    as an opaque string "etag", preserving the previous S3 ETag contract.
+    as an opaque string "etag", preserving the previous ETag contract.
     """
 
     def __init__(self, settings: Settings):
@@ -432,9 +432,3 @@ def replay_run_key(replay_run_id: str) -> str:
 def knowledge_gap_map_key(generated_at: str) -> str:
     """Immutable cached Knowledge_Gap_Map generation (create-only)."""
     return f"knowledge_gap/{generated_at}.json"
-
-
-# Backward-compatibility alias. The artifact store migrated from AWS S3 to GCS;
-# the historical name is retained so existing imports (and tests that bind the
-# backend-agnostic ``create_json`` / ``update_json_cas`` helpers) keep working.
-S3ArtifactStore = GcsArtifactStore

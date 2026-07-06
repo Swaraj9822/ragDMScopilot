@@ -37,7 +37,7 @@ from rag_system.storage import clarification_key
 
 
 class _FakeStore:
-    """Create-only JSON store double replicating S3ArtifactStore semantics."""
+    """Create-only JSON store double replicating GcsArtifactStore semantics."""
 
     def __init__(self) -> None:
         self.writes: dict[str, object] = {}

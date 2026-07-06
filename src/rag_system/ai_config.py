@@ -3,7 +3,7 @@
 An ``AI_Configuration`` evolves through a series of **immutable**
 :class:`~rag_system.models.AIConfigurationVersion` records — each capturing the
 full settings bundle (prompt, model, output schema, router threshold, retrieval
-settings, reranker configuration) plus a 1–500 character change description. A
+settings) plus a 1–500 character change description. A
 per-config :class:`~rag_system.models.AIConfigurationIndex` holds the ordered
 history (append-only version ids), the active-version pointer, and the audit log
 of :class:`~rag_system.models.ActivationEvent`\\ s.
@@ -83,7 +83,7 @@ class ConfigurationVersionNotFoundError(AIConfigError):
 
 
 class JsonStore(Protocol):
-    """The slice of :class:`~rag_system.storage.S3ArtifactStore` this module needs."""
+    """The slice of :class:`~rag_system.storage.GcsArtifactStore` this module needs."""
 
     def create_json(self, key: str, payload: object) -> str: ...
 
@@ -193,7 +193,6 @@ class AIConfigurationStore:
         change_description: str,
         output_schema: dict[str, Any] | None = None,
         retrieval_settings: dict[str, Any] | None = None,
-        reranker_config: dict[str, Any] | None = None,
         version_id: str | None = None,
         created_at: str | None = None,
     ) -> AIConfigurationVersion:
@@ -216,7 +215,6 @@ class AIConfigurationStore:
             output_schema=output_schema or {},
             router_threshold=router_threshold,
             retrieval_settings=retrieval_settings or {},
-            reranker_config=reranker_config or {},
             change_description=change_description,
             created_at=created_at or _utcnow_iso(),
         )
@@ -254,7 +252,7 @@ class AIConfigurationStore:
 
         Sets approval metadata on the target version without mutating its
         governed settings (prompt, model, output_schema, router_threshold,
-        retrieval_settings, reranker_config). If the version does not exist,
+        retrieval_settings). If the version does not exist,
         raises :class:`ConfigurationVersionNotFoundError`.
         """
         # Verify the version exists before attempting the CAS update.
@@ -385,7 +383,7 @@ class ResolvedConfig:
     """The result of resolving an AI configuration for the answer pipeline.
 
     Contains the full settings bundle that governs the answer path — router
-    threshold, retrieval settings, reranker config, prompt, model, and output
+    threshold, retrieval settings, prompt, model, and output
     schema — plus the ``version_id`` that the tracing service stamps on the
     trace (R9.1).
 
@@ -402,7 +400,6 @@ class ResolvedConfig:
         "output_schema",
         "router_threshold",
         "retrieval_settings",
-        "reranker_config",
         "is_resolved",
     )
 
@@ -416,7 +413,6 @@ class ResolvedConfig:
         output_schema: dict[str, Any],
         router_threshold: float,
         retrieval_settings: dict[str, Any],
-        reranker_config: dict[str, Any],
         is_resolved: bool = True,
     ) -> None:
         self.version_id = version_id
@@ -426,7 +422,6 @@ class ResolvedConfig:
         self.output_schema = output_schema
         self.router_threshold = router_threshold
         self.retrieval_settings = retrieval_settings
-        self.reranker_config = reranker_config
         self.is_resolved = is_resolved
 
     @classmethod
@@ -440,7 +435,6 @@ class ResolvedConfig:
             output_schema=version.output_schema,
             router_threshold=version.router_threshold,
             retrieval_settings=version.retrieval_settings,
-            reranker_config=version.reranker_config,
             is_resolved=True,
         )
 
@@ -460,7 +454,6 @@ class ResolvedConfig:
             output_schema={},
             router_threshold=0.5,
             retrieval_settings={},
-            reranker_config={},
             is_resolved=False,
         )
 
@@ -541,7 +534,7 @@ class AIConfigResolver:
 
         This ensures a fresh install always has a resolvable version to stamp.
         The default version is built from the existing ``config.py`` settings
-        (``gemini_model_id``, ``route_min_confidence``, retrieval/reranker
+        (``gemini_model_id``, ``route_min_confidence``, retrieval
         settings) so the resolver returns values consistent with what the system
         would use anyway.
         """
@@ -557,13 +550,6 @@ class AIConfigResolver:
             "sparse_enabled": settings.sparse_enabled,
         }
 
-        # Build a default reranker_config dict from the relevant config knobs.
-        reranker_config: dict[str, Any] = {
-            "rerank_top_k": settings.rerank_top_k,
-            "rerank_enabled": settings.rerank_enabled,
-            "rerank_model_id": settings.bedrock_rerank_model_id,
-        }
-
         version = self._store.create_version(
             config_id,
             prompt=_DEFAULT_PROMPT,
@@ -571,7 +557,6 @@ class AIConfigResolver:
             router_threshold=settings.route_min_confidence,
             change_description="Initial default configuration (auto-seeded)",
             retrieval_settings=retrieval_settings,
-            reranker_config=reranker_config,
         )
 
         # Activate the newly created version so subsequent resolves find it.
