@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useReducer, useRef, useState } from "react";
 import {
   AlertTriangle,
   BarChart3,
@@ -22,7 +22,6 @@ import {
   type SchemaTable,
 } from "../api/sqlLab";
 import type { ChartSpec } from "./computeChartSpecData";
-import { AutoDashboard } from "./AutoDashboard";
 import { buildBrowseStatement } from "./buildBrowseStatement";
 import { toCsv } from "./toCsv";
 import { pushHistory, readHistory } from "./queryHistory";
@@ -31,6 +30,15 @@ import {
   sqlLabReducer,
 } from "./sqlLabReducer";
 import styles from "./SqlLabPage.module.css";
+
+// Lazy-load the auto-dashboard so its heavy recharts dependency is only pulled
+// in after the operator clicks "Analyze", keeping the initial SQL Lab page
+// chunk small. Eager in tests to avoid jsdom dynamic-import flakiness (the same
+// convention App.tsx uses for its route pages).
+const isTest = import.meta.env.MODE === "test";
+const AutoDashboard = isTest
+  ? (await import("./AutoDashboard")).default
+  : lazy(() => import("./AutoDashboard"));
 
 // ---------------------------------------------------------------------------
 // CSV export helper
@@ -590,10 +598,23 @@ export default function SqlLabPage() {
               )}
 
               {analysisState.kind === "ready" && (
-                <AutoDashboard
-                  spec={analysisState.spec}
-                  resultSet={analysisState.resultSet}
-                />
+                <Suspense
+                  fallback={
+                    <div
+                      className={styles.skeletonBlock}
+                      data-testid="sql-lab-analysis-skeleton"
+                      aria-hidden="true"
+                    >
+                      <Skeleton height={20} width="30%" />
+                      <Skeleton height={80} />
+                    </div>
+                  }
+                >
+                  <AutoDashboard
+                    spec={analysisState.spec}
+                    resultSet={analysisState.resultSet}
+                  />
+                </Suspense>
               )}
             </section>
           )}

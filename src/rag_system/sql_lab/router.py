@@ -70,6 +70,13 @@ router = APIRouter(prefix="/sql", tags=["sql-lab"])
 #: guard-rejection paths, instead of FastAPI's default ``422``.
 MAX_SQL_LENGTH = 10_000
 
+#: Upper bound on the number of rows accepted in a ``POST /sql/analyze`` body.
+#: A Result_Set can carry at most ``sql_lab_row_limit`` rows (max 10000), so this
+#: never rejects a legitimate payload; it caps an oversized/abusive body so the
+#: request is not held unbounded in memory (the analyzer only forwards a 20-row
+#: sample to the model regardless).
+MAX_ANALYZE_ROWS = 10_000
+
 
 class SqlRunRequest(BaseModel):
     """Request body for ``POST /sql/run``.
@@ -292,7 +299,7 @@ class SqlAnalyzeRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     columns: list[str]
-    rows: list[dict[str, Any]]
+    rows: list[dict[str, Any]] = Field(max_length=MAX_ANALYZE_ROWS)
     row_count: int = Field(alias="rowCount")
     duration_ms: int = Field(default=0, alias="durationMs")
     sql: str = Field(default="")
