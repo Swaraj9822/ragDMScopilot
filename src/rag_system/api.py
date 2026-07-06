@@ -148,6 +148,24 @@ async def lifespan(app: FastAPI):
     if settings.tracing_enabled:
         _start_observability_platform()
 
+    # SQL Lab audit setup: ensure the sql_lab_audit table exists before the
+    # route can serve traffic. Unlike the auth/observability schemas, this is
+    # not merely cosmetic — SQL Lab auditing is mandatory (R8.6), so if the
+    # table is missing every POST /sql/run fails with a 500 after the query
+    # runs. The DDL is idempotent (CREATE TABLE/INDEX IF NOT EXISTS), so it is
+    # safe to run on every startup and removes the need for a separate manual
+    # migration step.
+    from rag_system.sql_lab.audit_store import SqlLabAuditStore
+
+    try:
+        SqlLabAuditStore(settings).create_schema()
+    except Exception:  # noqa: BLE001 - never let schema setup crash boot
+        logger.exception(
+            "Failed to apply SQL Lab audit schema; POST /sql/run will return an "
+            "error until the sql_lab_audit table exists and the database is "
+            "reachable. The rest of the API is unaffected."
+        )
+
     yield
 
 
