@@ -294,14 +294,22 @@ class SqlAnalyzeRequest(BaseModel):
 
     ``durationMs``, ``sql``, and ``truncated`` are accepted for contract fidelity
     but default to empty/zero because they play no part in analysis.
+
+    Fields are named in camelCase to match the JSON contract directly rather than
+    via pydantic ``alias``: FastAPI/Pydantic emits an ``UnsupportedFieldAttribute``
+    warning for ``Field(alias=...)`` during request-body field extraction here,
+    so declaring the wire names as the field names avoids that warning debt
+    (which would break a warnings-as-errors CI) while keeping the exact same
+    contract. This mirrors the camelCase fields already used in
+    :mod:`rag_system.sql_lab.chart_spec` (e.g. ``xColumn``).
     """
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(extra="ignore")
 
     columns: list[str]
     rows: list[dict[str, Any]] = Field(max_length=MAX_ANALYZE_ROWS)
-    row_count: int = Field(alias="rowCount")
-    duration_ms: int = Field(default=0, alias="durationMs")
+    rowCount: int  # noqa: N815 - camelCase mirrors the JSON contract
+    durationMs: int = 0  # noqa: N815 - camelCase mirrors the JSON contract
     sql: str = Field(default="")
     truncated: bool = Field(default=False)
     mode: AnalysisMode = Field(
@@ -358,7 +366,7 @@ def analyze_result_set(
     result_set = {
         "columns": request.columns,
         "rows": request.rows,
-        "rowCount": request.row_count,
+        "rowCount": request.rowCount,
     }
 
     try:
