@@ -44,14 +44,14 @@ and reverse-proxies `/api/*` to the backend, so everything is same-origin (no CO
         └───────────┬─────────────┘
                     │ (internal Docker network)
         ┌───────────▼─────────────┐     ┌──────────────────────────┐
-        │  api  (FastAPI/uvicorn)  │     │  worker (SQS ingestion)  │
-        │   • auth, query, copilot │     │   • polls SQS forever    │
+        │  api  (FastAPI/uvicorn)  │     │ worker (Pub/Sub ingestion)│
+        │   • auth, query, copilot │     │   • polls Pub/Sub forever │
         └───────────┬─────────────┘     └────────────┬─────────────┘
                     │                                 │
                     └──────────────┬──────────────────┘
                                    ▼
-   External services (unchanged, NOT hosted on GCP):
-   AWS S3 · AWS SQS · AWS Bedrock · AWS RDS PostgreSQL · Pinecone · LlamaParse · Vertex AI (Gemini)
+   External services:
+   GCS · Pub/Sub · Vertex AI (Gemini) on GCP · Neon PostgreSQL · Pinecone · LlamaParse
 ```
 
 - **api** and **worker** run from the **same Docker image** (built from the root
@@ -242,7 +242,7 @@ gcloud compute ssh rag-console --zone=us-east1-b `
 ```
 
 This took a few minutes: it installed all Python dependencies (FastAPI,
-llama-index, pinecone, boto3, etc.), built the frontend bundle, and produced three
+llama-index, pinecone, google-cloud-storage, google-cloud-pubsub, etc.), built the frontend bundle, and produced three
 images — `rag-console-api`, `rag-console-worker`, `rag-console-web` — then started
 all three containers.
 
@@ -260,8 +260,8 @@ gcloud compute ssh rag-console --zone=us-east1-b `
 
 Observed:
 - `api` → `Up (healthy)`; logs show "Applied auth schema", "Applied observability
-  schema", "Application startup complete" (i.e. it reached the RDS database).
-- `worker` → `Up`; logs show "SqsIngestionQueue initialised" and "Ingestion worker
+  schema", "Application startup complete" (i.e. it reached the Neon Postgres database).
+- `worker` → `Up`; logs show "PubSubIngestionQueue initialised" and "Ingestion worker
   started".
 - `web` → `Up`, publishing `0.0.0.0:80->80`.
 - `GET /api/health` → `{"status":"ok"}`.
@@ -330,8 +330,9 @@ gcloud compute instances start rag-console --zone=us-east1-b
   credentials that have lived in the repo workspace.
 - **Open port.** Only port 80 is exposed publicly; the API (8000) is reachable only
   on the internal Docker network, not from the internet.
-- **Cross-cloud.** The data/AI plane (S3, SQS, Bedrock, RDS) is on AWS, so calls
-  leave GCP. Expect a little extra latency and AWS egress.
+- **Cross-cloud.** Compute and the AI plane (GCS, Pub/Sub, Vertex AI) run on GCP;
+  Pinecone, LlamaParse, and the Neon Postgres DB are external SaaS, so those calls
+  leave GCP. Expect a little extra latency and egress.
 
 ---
 
@@ -340,7 +341,7 @@ gcloud compute instances start rag-console --zone=us-east1-b
 - `e2-medium` running 24/7 ≈ **$25–35/month-equivalent**, fully covered by the
   **$300 / 90-day trial credit**. Stopping the VM between tests stretches the credit
   further.
-- This covers **only** the GCP VM. AWS, Pinecone, LlamaParse, and Vertex AI usage
+- This covers **only** the GCP VM. Pinecone, LlamaParse, Neon, and Vertex AI usage
   bill separately.
 
 ---
@@ -384,7 +385,7 @@ the backend and starting query classification, then repeatedly failing on the
 Gemini (Vertex AI) call before giving up:
 
 ```
-WARNING rag_system.retry  Retrying ...BedrockQueryClassifier.classify ... raised
+WARNING rag_system.retry  Retrying ...LlmQueryClassifier.classify ... raised
   ClientError: 403 PERMISSION_DENIED. {'error': {'code': 403,
   'message': 'Request had insufficient authentication scopes.',
   'status': 'PERMISSION_DENIED',

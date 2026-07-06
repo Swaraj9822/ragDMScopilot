@@ -2,9 +2,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-import boto3
-import boto3.session
-from botocore.config import Config as BotoConfig
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -27,13 +24,7 @@ class ModelPricing(BaseModel):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=_ENV_FILE, env_prefix="", extra="ignore")
 
-    # --- AWS (retained only for the optional, currently-disabled Bedrock
-    # reranker). The rest of the data/AI plane now runs on GCP. ---
-    aws_access_key_id: str | None = Field(default=None, alias="AWS_ACCESS_KEY_ID")
-    aws_secret_access_key: str | None = Field(default=None, alias="AWS_SECRET_ACCESS_KEY")
-    aws_region: str = Field(default="us-east-1", alias="AWS_REGION")
-
-    # --- Google Cloud Storage artifact store (was AWS S3) ---
+    # --- Google Cloud Storage artifact store ---
     gcs_bucket: str = Field(alias="RAG_GCS_BUCKET")
     # Optional Cloud KMS key for CMEK (customer-managed) object encryption, as a
     # full resource name:
@@ -41,7 +32,7 @@ class Settings(BaseSettings):
     # rest by default, so this is only needed when CMEK is required.
     gcs_kms_key_name: str | None = Field(default=None, alias="RAG_GCS_KMS_KEY_NAME")
 
-    # --- Cloud Pub/Sub ingestion queue (was AWS SQS) ---
+    # --- Cloud Pub/Sub ingestion queue ---
     # Optional so tests/local setups that never touch the queue can construct
     # Settings without them; the queue client validates their presence at use.
     pubsub_topic_id: str | None = Field(default=None, alias="RAG_PUBSUB_TOPIC_ID")
@@ -65,13 +56,14 @@ class Settings(BaseSettings):
     pinecone_index_name: str = Field(alias="PINECONE_INDEX_NAME")
     # Serverless placement + metric used when (re)creating the index via
     # scripts/create_pinecone_index.py. "dotproduct" is required for Pinecone
-    # sparse+dense hybrid search. The cloud/region below are Pinecone-hosted
-    # infrastructure and are unrelated to the user's own AWS account.
+    # sparse+dense hybrid search. The cloud/region below name Pinecone's own
+    # hosted infrastructure (Pinecone runs on multiple providers); they are not
+    # a cloud account you manage.
     pinecone_cloud: str = Field(default="aws", alias="RAG_PINECONE_CLOUD")
     pinecone_region: str = Field(default="us-east-1", alias="RAG_PINECONE_REGION")
     pinecone_metric: str = Field(default="dotproduct", alias="RAG_PINECONE_METRIC")
 
-    # --- Embeddings (Google Gemini on Vertex AI; was AWS Bedrock Titan) ---
+    # --- Embeddings (Google Gemini on Vertex AI) ---
     embedding_model_id: str = Field(
         default="gemini-embedding-001", alias="EMBEDDING_MODEL_ID"
     )
@@ -84,9 +76,6 @@ class Settings(BaseSettings):
     # turns a serial per-chunk round-trip into a parallel fan-out — the dominant
     # ingestion latency win for multi-hundred-chunk documents.
     embedding_max_workers: int = Field(default=8, alias="RAG_EMBEDDING_MAX_WORKERS")
-    bedrock_rerank_model_id: str = Field(
-        default="cohere.rerank-v3-5:0", alias="BEDROCK_RERANK_MODEL_ID"
-    )
 
     # --- Text-generation LLM (Google Gemini on Vertex AI) ---
     gemini_model_id: str = Field(default="gemini-3.5-flash", alias="GEMINI_MODEL_ID")
@@ -116,13 +105,15 @@ class Settings(BaseSettings):
     pinecone_upsert_batch_size: int = Field(
         default=100, alias="RAG_PINECONE_UPSERT_BATCH_SIZE"
     )
-    # Concurrency for fanning out the per-document S3 reads behind
+    # Concurrency for fanning out the per-document artifact reads behind
     # ``GET /documents`` so the listing does not degrade to N serial round-trips.
     document_list_max_workers: int = Field(
         default=16, alias="RAG_DOCUMENT_LIST_MAX_WORKERS"
     )
-    rerank_top_k: int = Field(default=12, alias="RAG_RERANK_TOP_K")
-    rerank_enabled: bool = Field(default=False, alias="RAG_RERANK_ENABLED")
+    # How many retrieved hits are kept as context for generation after hybrid
+    # retrieval. Trims the larger dense/sparse candidate set down to the final
+    # context window passed to the answer generator.
+    context_top_k: int = Field(default=12, alias="RAG_CONTEXT_TOP_K")
     sparse_enabled: bool = Field(default=True, alias="RAG_SPARSE_ENABLED")
     low_top_score_threshold: float | None = Field(default=None, alias="RAG_LOW_TOP_SCORE_THRESHOLD")
 
@@ -222,13 +213,6 @@ class Settings(BaseSettings):
                 f"invalid value {value!r}: must be within 1 and 1000 inclusive"
             )
         return value
-
-    # AWS client tuning. Retained for the optional (currently disabled) Bedrock
-    # reranker: explicit timeouts + adaptive retries fail fast and back off on
-    # throttling instead of hanging on a single slow call.
-    aws_connect_timeout_s: int = Field(default=5, alias="AWS_CONNECT_TIMEOUT_S")
-    aws_read_timeout_s: int = Field(default=30, alias="AWS_READ_TIMEOUT_S")
-    aws_max_attempts: int = Field(default=4, alias="AWS_MAX_ATTEMPTS")
 
     # --- Observability / tracing platform ---
     # New tracing settings use the existing alias mechanism (R10.9). The
@@ -595,26 +579,6 @@ class Settings(BaseSettings):
                 'python -c "import secrets; print(secrets.token_urlsafe(48))"'
             )
         return self.jwt_secret_key
-
-    def boto3_session(self) -> boto3.session.Session:
-        """Return a boto3 Session pre-loaded with credentials from .env.
-
-        Falls back to the default credential chain (IAM role, ~/.aws/credentials)
-        when the keys are not set — safe for production deployments.
-        """
-        return boto3.session.Session(
-            aws_access_key_id=self.aws_access_key_id or None,
-            aws_secret_access_key=self.aws_secret_access_key or None,
-            region_name=self.aws_region,
-        )
-
-    def boto3_client_config(self) -> BotoConfig:
-        """botocore Config with bounded timeouts and adaptive retries."""
-        return BotoConfig(
-            connect_timeout=self.aws_connect_timeout_s,
-            read_timeout=self.aws_read_timeout_s,
-            retries={"max_attempts": self.aws_max_attempts, "mode": "adaptive"},
-        )
 
     def gcs_client(self):
         """Return a Google Cloud Storage client using Application Default

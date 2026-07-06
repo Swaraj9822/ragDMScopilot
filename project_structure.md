@@ -25,25 +25,24 @@ backend. It gives operators three jobs behind one UI:
 It is a two-part system:
 
 - **Backend** — Python 3.11+ / FastAPI app (`src/rag_system`) plus a separate
-  SQS-driven ingestion **worker**. Package name: `production-rag`.
+  Pub/Sub-driven ingestion **worker**. Package name: `production-rag`.
 - **Frontend** — React 18 + TypeScript + Vite SPA (`frontendkimchi`), the
   "Kimchi" RAG Console UI.
 
 The product brief, brand, and design principles live in `PRODUCT.md`. The UI
 targets WCAG 2.2 AA.
 
-### External services (data / AI plane, all on AWS unless noted)
+### External services (data / AI plane)
 
 | Concern | Service |
 |---|---|
 | Document parsing | LlamaParse (LlamaCloud) |
 | Vector search | Pinecone (hybrid dense + BM25 sparse) |
-| Embeddings | Amazon Titan Embed Text V2 (AWS Bedrock) |
-| Reranking | Cohere Rerank 3.5 (AWS Bedrock Agent Runtime) |
+| Embeddings | Google Gemini `gemini-embedding-001` on Vertex AI (GCP) |
 | Text generation | Google Gemini on Vertex AI (GCP) |
-| Artifact storage | Amazon S3 |
-| Ingestion queue | Amazon SQS |
-| Auth / trace / log store | PostgreSQL (Amazon RDS) |
+| Artifact storage | Google Cloud Storage (GCP) |
+| Ingestion queue | Google Cloud Pub/Sub (GCP) |
+| Auth / trace / log store | PostgreSQL (Neon) |
 
 ---
 
@@ -71,8 +70,7 @@ c:\aaaa\
 ├── PRODUCT.md               # Product brief, brand, design principles
 ├── gcp_setup.md             # GCP setup notes
 ├── vm_setup.sh              # VM bootstrap script
-├── rdscon.py                # RDS connection helper
-├── dlq-redrive.json         # SQS dead-letter-queue redrive config
+├── rdscon.py                # Postgres connection helper
 └── .env                     # Secrets/config (NOT committed)
 ```
 
@@ -93,24 +91,23 @@ process: `python -m rag_system.worker`.
 | File | Responsibility |
 |---|---|
 | `api.py` | FastAPI app: lifespan wiring, middleware (CORS, trace id), and all HTTP routes for documents, queries, ask/stream, traces, and logs. Mounts the auth router and starts flush workers + retention scheduler. |
-| `config.py` | `Settings` (pydantic-settings) loaded from `.env`; AWS/Pinecone/Gemini config, boto3 session/client factories. `get_settings()` is cached. |
+| `config.py` | `Settings` (pydantic-settings) loaded from `.env`; Pinecone/Gemini/GCP config, GCS + Pub/Sub client factories. `get_settings()` is cached. |
 | `models.py` | Core pydantic domain models: `DocumentRecord` (incl. `active_version`, the atomically-published searchable version), `DocumentStatus`, `QueryRequest/Response`, `UnifiedQuery*`, `Citation`, `Chunk`/`RetrievalHit` (version-tagged), feedback + trace records. |
-| `service.py` | `RagService` — orchestrates ingestion (parse→chunk→embed→index) and single-pipeline document Q&A; off-request-path query-trace persistence via a bounded thread pool. Ingestion is **versioned and atomically published**: a new version's vectors become searchable only when the record's `active_version` flips, retrieval filters hits to the active version, and superseded/failed versions are garbage-collected. Stale writes from replaced versions raise `StaleIngestionError`; deleted-doc writes raise `DocumentDeletedError` (record writes use S3 compare-and-set). |
+| `service.py` | `RagService` — orchestrates ingestion (parse→chunk→embed→index) and single-pipeline document Q&A; off-request-path query-trace persistence via a bounded thread pool. Ingestion is **versioned and atomically published**: a new version's vectors become searchable only when the record's `active_version` flips, retrieval filters hits to the active version, and superseded/failed versions are garbage-collected. Stale writes from replaced versions raise `StaleIngestionError`; deleted-doc writes raise `DocumentDeletedError` (record writes use GCS compare-and-set). |
 | `router.py` | Agentic **query router**: classifies a query as `rag`, `database`, or `hybrid`; fans out and blends results; produces `UnifiedQueryResponse`. |
 | `parsing.py` | `DocumentParserRouter` — multi-format parsing (LlamaParse for PDF/DOCX/PPTX/images; native handling for XLSX/CSV/HTML/TXT/MD). |
 | `chunking.py` | `DocumentChunker` — token-based sentence chunking via LlamaIndex `SentenceSplitter`. |
-| `embedding.py` | `BedrockTitanEmbedder` — embeds chunks with Titan Embed Text V2 on Bedrock. |
+| `embedding.py` | `GeminiEmbedder` — embeds chunks with `gemini-embedding-001` on Vertex AI (L2-normalized vectors). |
 | `sparse.py` | `BM25SparseEncoder` — BM25 sparse vectors (MS MARCO) for hybrid lexical matching. |
 | `retrieval.py` | `PineconeHybridIndex` — upsert + hybrid (dense + sparse) query against Pinecone; version-scoped deletes (`delete_document_version` / `delete_document_except_version`) support atomic-publication cleanup of superseded/partial vectors. |
-| `rerank.py` | `BedrockCohereReranker` — reranks hits with Cohere Rerank 3.5. |
 | `generation.py` | `GroundedAnswerGenerator` — Gemini-backed grounded answer generation with citations; streaming contract uses a `###META###` marker separating prose from trailing JSON. **Fails closed** on unparseable model output: keeps the prose but attaches no citations and marks evidence insufficient rather than crediting every retrieved chunk. |
 | `copilot.py` | `DatabaseCopilotService` + `CopilotSqlGuard` — text-to-SQL copilot. The guard is an **AST-based allowlist** (parses SQL with `sqlglot`) that enforces a single read-only aggregating `SELECT`, rejects writes/DDL/CTEs/subqueries/set-ops/window functions, and checks every referenced table *and* column against the schema catalog; invalid SQL raises `SqlValidationError`. Runs approved SQL against the business DB and returns rows. Uses the schema catalog in `config/`. |
 | `llm.py` | `TextLLM` protocol + `build_text_llm()` — single Gemini/Vertex abstraction shared by generation, routing, and copilot. |
 | `confidence.py` | Deterministic numeric confidence scoring (`[0,1]`) from explainable signals (grounding, logprobs); helpers for RAG, database, and combined scores. |
 | `evaluation.py` | Golden-set evaluation harness: `GoldenCase` model + scoring against `tests/golden/rag_golden_set.json`. |
-| `storage.py` | `S3ArtifactStore` + S3 key helpers (parsed docs, chunks, embedding manifests, document records, query traces/feedback). |
-| `queue.py` | `SqsIngestionQueue`, `IngestionJob`, `ReceivedIngestionJob` — SQS enqueue/receive/delete for ingestion. |
-| `worker.py` | Standalone ingestion worker process: polls SQS, runs `RagService` ingestion, propagates trace ids, backs off on errors. |
+| `storage.py` | `GcsArtifactStore` + object key helpers (parsed docs, chunks, embedding manifests, document records, query traces/feedback). |
+| `queue.py` | `PubSubIngestionQueue`, `IngestionJob`, `ReceivedIngestionJob` — Pub/Sub publish/pull/ack for ingestion. |
+| `worker.py` | Standalone ingestion worker process: polls Pub/Sub, runs `RagService` ingestion, propagates trace ids, backs off on errors. |
 | `observability.py` | Centralised structured logging, per-request trace-id contextvars, token tallies, metrics, and `retry_on_transient` (tenacity) helpers. |
 | `rate_limit.py` | In-process sliding-window rate limiter + FastAPI dependency for abuse-prone routes (login/register/refresh). |
 
@@ -250,7 +247,7 @@ Broad coverage groups (property-based tests are suffixed `_properties`):
   `test_api_ingestion_queue`, `test_golden_eval`,
   `test_performance_latency_budgets`.
 
-Tests requiring live services (Postgres, Pinecone, Bedrock) self-skip when those
+Tests requiring live services (Postgres, Pinecone, Vertex AI) self-skip when those
 are absent, so the suite runs credential-free in CI.
 
 ### 5.2 Frontend
@@ -269,10 +266,9 @@ Vitest + Testing Library + MSW, colocated `*.test.ts(x)` next to source
 | Path | Purpose |
 |---|---|
 | `config/copilot_schema_catalog.json` | Business-DB schema catalog powering the text-to-SQL copilot: tables, columns, joins, business rules, example questions. `*.example.json` is the committed template. |
-| `scripts/enqueue_pdf.py` | Helper to enqueue a PDF ingestion job onto SQS. |
-| `rdscon.py` | RDS/Postgres connection helper. |
-| `dlq-redrive.json` | SQS dead-letter-queue redrive configuration. |
-| `.env` | All secrets/config (AWS, Pinecone, LlamaParse, Vertex AI, JWT). **Never committed.** |
+| `scripts/enqueue_pdf.py` | Helper to enqueue a PDF ingestion job onto Pub/Sub. |
+| `rdscon.py` | Postgres connection helper. |
+| `.env` | All secrets/config (Pinecone, LlamaParse, GCP/Vertex AI, GCS, Pub/Sub, DB, JWT). **Never committed.** |
 | `*.log` (root) | Local process logs (`ask-server.*`, `backend-review.*`). |
 
 ---
@@ -305,7 +301,7 @@ Single-host topology (see `DEPLOY.md`):
 
 ```
 Internet → caddy (TLS 80/443) → web (nginx: SPA + /api proxy) → api (uvicorn :8000)
-                                                              ↘ worker (SQS ingestion)
+                                                              ↘ worker (Pub/Sub ingestion)
 ```
 
 - `api` and `worker` share the same backend image (`Dockerfile`); the worker
@@ -348,7 +344,7 @@ Deployment runbook and GCP setup: `DEPLOY.md`, `gcp_setup.md`, `vm_setup.sh`.
   (searchable) when `DocumentRecord.active_version` flips atomically after a
   successful ingest, so a failed/superseded re-ingest never destroys the last
   good version and readers only ever see published vectors. Record writes are
-  guarded by S3 compare-and-set against deleted-resurrection and stale-version
+  guarded by GCS compare-and-set against deleted-resurrection and stale-version
   clobbering.
 - **Fail closed**: security- and grounding-sensitive paths refuse rather than
   guess — the SQL guard rejects anything it cannot prove safe, and unparseable
@@ -367,7 +363,7 @@ Deployment runbook and GCP setup: `DEPLOY.md`, `gcp_setup.md`, `vm_setup.sh`.
 |---|---|
 | Add/change an HTTP route | `src/rag_system/api.py` (or `auth/router.py`) |
 | Change how queries are routed (rag/db/hybrid) | `src/rag_system/router.py` |
-| Tune retrieval / reranking | `retrieval.py`, `rerank.py`, `sparse.py` |
+| Tune retrieval | `retrieval.py`, `sparse.py` |
 | Change answer generation / prompts | `generation.py`, `copilot.py`, `llm.py` |
 | Adjust the ingestion pipeline | `service.py`, `parsing.py`, `chunking.py`, `embedding.py`, `worker.py` |
 | Work on tracing/logs | `src/rag_system/observability_tracing/` |

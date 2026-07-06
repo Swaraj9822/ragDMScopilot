@@ -13,7 +13,7 @@ Behaviour (R10.1–R10.5)
   recorded for the id, no diagnosis is performed and
   :class:`TraceNotFoundError` is raised (R10.2).
 * The investigator analyzes the trace's ``route``, retrieval scores (from
-  ``retrieved_hits``), rerank order (the ordering of ``retrieved_hits``), and
+  ``retrieved_hits``), retrieval order (the ordering of ``retrieved_hits``), and
   the generation outcome (``claims`` / ``evidence_status`` /
   ``abstention_reason_code``) (R10.1).
 * When a cause is identified, the diagnosis carries a cause description that
@@ -61,7 +61,7 @@ TraceResolver = Callable[[str], QueryTraceRecord | None]
 
 #: The four elements the investigator analyzes (R10.1); a cause description must
 #: reference at least one of these (R10.3).
-_ANALYZED_ELEMENTS = ("route", "retrieval_scores", "rerank_order", "generation_outcome")
+_ANALYZED_ELEMENTS = ("route", "retrieval_scores", "retrieval_order", "generation_outcome")
 
 #: Valid recommendation targets (R10.5).
 _TARGETS = ("ai_configuration", "corpus")
@@ -175,7 +175,7 @@ def _build_investigator_llm(settings: Settings) -> TextLLM:
 def _build_diagnosis_prompt(trace: QueryTraceRecord) -> str:
     """Render the diagnosis prompt from the recorded trace (R10.1).
 
-    Surfaces the four analyzed elements — route, retrieval scores, rerank order,
+    Surfaces the four analyzed elements — route, retrieval scores, retrieval order,
     and generation outcome — so the model reasons over exactly the recorded
     signals.
     """
@@ -197,7 +197,7 @@ def _build_diagnosis_prompt(trace: QueryTraceRecord) -> str:
         "You are an AI trace investigator for an enterprise RAG system. An "
         "operator has asked you to diagnose why a recorded query was "
         "unsuccessful. Analyze ONLY the recorded trace below and reason over its "
-        "route, retrieval scores, rerank order, and generation outcome.\n"
+        "route, retrieval scores, retrieval order, and generation outcome.\n"
         "\n"
         f"Question: {trace.question}\n"
         f"Route: {trace.route}\n"
@@ -207,7 +207,7 @@ def _build_diagnosis_prompt(trace: QueryTraceRecord) -> str:
         f"Abstention reason code: {trace.abstention_reason_code}\n"
         f"SQL: {trace.sql}\n"
         "\n"
-        "Retrieval hits (in rerank order, best first):\n"
+        "Retrieval hits (in retrieval order, best first):\n"
         f"{retrieval_block}\n"
         "\n"
         "Generation outcome (decomposed claims and evidence status):\n"
@@ -218,7 +218,7 @@ def _build_diagnosis_prompt(trace: QueryTraceRecord) -> str:
         "\n"
         "Diagnose the most likely cause of the unsuccessful outcome. Your cause "
         "description MUST reference at least one analyzed element: the route, the "
-        "retrieval scores, the rerank order, or the generation outcome. If you "
+        "retrieval scores, the retrieval order, or the generation outcome. If you "
         "identify a cause, recommend between 1 and 10 concrete changes; each "
         "recommendation must target either the AI configuration "
         '("ai_configuration") or the corpus ("corpus"). If you cannot determine '
@@ -227,7 +227,7 @@ def _build_diagnosis_prompt(trace: QueryTraceRecord) -> str:
         "\n"
         "Return ONLY valid JSON with no markdown formatting:\n"
         '{"cause_description": "one or two sentences", '
-        '"analyzed_elements": ["route" | "retrieval_scores" | "rerank_order" | '
+        '"analyzed_elements": ["route" | "retrieval_scores" | "retrieval_order" | '
         '"generation_outcome"], '
         '"recommendations": [{"target": "ai_configuration" | "corpus", '
         '"description": "one sentence"}]}'
@@ -336,7 +336,7 @@ def _available_elements(trace: QueryTraceRecord) -> list[str]:
     if trace.retrieved_hits:
         elements.append("retrieval_scores")
         if len(trace.retrieved_hits) > 1:
-            elements.append("rerank_order")
+            elements.append("retrieval_order")
     if trace.claims or trace.abstention_reason_code is not None or trace.answer:
         elements.append("generation_outcome")
     return elements

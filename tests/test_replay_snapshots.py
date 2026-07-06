@@ -26,7 +26,7 @@ from rag_system.storage import (
 class _FakeStore:
     """Create-only store that rejects a duplicate key with ``PreconditionFailed``.
 
-    Mirrors :meth:`S3ArtifactStore.create_json` semantics: the first write to a
+    Mirrors :meth:`GcsArtifactStore.create_json` semantics: the first write to a
     key succeeds, a second write to the same key fails its precondition.
     """
 

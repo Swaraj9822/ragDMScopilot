@@ -9,7 +9,7 @@ separated sections:
   (a) BASELINE assertions that PASS on the *current, unfixed* code. These record
       the behavior to preserve: the production storage key scheme
       (``raw_document_key`` / ``raw_pdf_key``), the legacy ``put_pdf`` / ``get_pdf``
-      round-trip on ``IntegrationStore``, the production ``S3ArtifactStore``
+      round-trip on ``IntegrationStore``, the production ``GcsArtifactStore``
       interface, and the still-used router-test imports (``QueryRoute``,
       ``_parse_routing_response``).
 
@@ -35,7 +35,7 @@ from pathlib import Path
 from hypothesis import given
 from hypothesis import strategies as st
 
-from rag_system.storage import S3ArtifactStore, raw_document_key, raw_pdf_key
+from rag_system.storage import GcsArtifactStore, raw_document_key, raw_pdf_key
 
 # IntegrationStore is the fake whose put_raw/get_raw round-trip we preserve/extend.
 import test_rag_flow_integration as integration_tests
@@ -107,24 +107,24 @@ def test_baseline_integration_store_legacy_put_pdf_get_pdf_round_trip(
 
 
 def test_baseline_production_storage_interface_present() -> None:
-    """Production ``S3ArtifactStore`` keeps put_raw/get_raw and put_pdf/get_pdf.
+    """Production ``GcsArtifactStore`` keeps put_raw/get_raw and put_pdf/get_pdf.
 
     PASSES on unfixed code - the fix is test-only; the production interface under
     ``src/rag_system/`` must remain unchanged.
     """
     put_raw_params = [
-        p for p in inspect.signature(S3ArtifactStore.put_raw).parameters if p != "self"
+        p for p in inspect.signature(GcsArtifactStore.put_raw).parameters if p != "self"
     ]
     assert put_raw_params == ["document_id", "version", "filename", "content"]
 
     get_raw_params = [
-        p for p in inspect.signature(S3ArtifactStore.get_raw).parameters if p != "self"
+        p for p in inspect.signature(GcsArtifactStore.get_raw).parameters if p != "self"
     ]
     assert get_raw_params == ["document_id", "version", "filename"]
 
     # Backward-compatible aliases remain available.
-    assert callable(S3ArtifactStore.put_pdf)
-    assert callable(S3ArtifactStore.get_pdf)
+    assert callable(GcsArtifactStore.put_pdf)
+    assert callable(GcsArtifactStore.get_pdf)
 
 
 def test_baseline_router_symbols_importable_and_used() -> None:

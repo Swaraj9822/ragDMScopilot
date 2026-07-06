@@ -160,7 +160,7 @@ The RAG Console codebase demonstrates **strong engineering foundations** with so
 **Strengths**:
 - Document versioning with atomic version switching (excellent design)
 - Bounded thread pool for off-request-path trace persistence (prevents thread explosion)
-- Optimistic concurrency control with S3 `if_match` ETags
+- Optimistic concurrency control with GCS generation preconditions
 - Comprehensive instrumentation (metrics, tracing, detailed logs)
 
 **Issues**:
@@ -555,7 +555,7 @@ The RAG Console codebase demonstrates **strong engineering foundations** with so
 
 1. **⚠️ Missing integration tests for storage race conditions**
    - No tests for the compare-and-set loop under contention.
-   - Recommendation: Add tests with concurrent writes to the same S3 key.
+   - Recommendation: Add tests with concurrent writes to the same GCS object.
 
 2. **⚠️ Frontend tests using MSW (mock service worker)**
    - Good for mocking, but no actual API contract testing.
@@ -779,7 +779,7 @@ This tests a subtle concurrency issue (refresh token family consistency).
 | Test coverage (backend) | ~80% | Good |
 | Test coverage (frontend) | ~40% | Needs work |
 | Cyclomatic complexity | Moderate | Good |
-| Dependency count | High (many AWS/GCP services) | Expected |
+| Dependency count | High (many GCP/SaaS services) | Expected |
 | Code duplication | Low | Good |
 | Type coverage (Python) | ~95% | Excellent |
 | Type coverage (TypeScript) | ~90% | Excellent |

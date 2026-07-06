@@ -77,7 +77,7 @@ class ClarificationReplyRequiredError(ClarificationError):
 
 
 class JsonStore(Protocol):
-    """The slice of :class:`~rag_system.storage.S3ArtifactStore` this module needs."""
+    """The slice of :class:`~rag_system.storage.GcsArtifactStore` this module needs."""
 
     def create_json(self, key: str, payload: object) -> str: ...
 

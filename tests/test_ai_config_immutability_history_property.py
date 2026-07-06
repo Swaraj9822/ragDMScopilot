@@ -72,10 +72,10 @@ class _FakeStore:
                 raise PreconditionFailed(key)
         self.objects[key] = (payload, self._next_etag())
 
-    from rag_system.storage import S3ArtifactStore
+    from rag_system.storage import GcsArtifactStore
 
-    create_json = S3ArtifactStore.create_json
-    update_json_cas = S3ArtifactStore.update_json_cas
+    create_json = GcsArtifactStore.create_json
+    update_json_cas = GcsArtifactStore.update_json_cas
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +251,6 @@ def test_history_returns_versions_in_reverse_chronological_order(
     description=_descriptions,
     output_schema=_schemas,
     retrieval_settings=_settings_dicts,
-    reranker_config=_settings_dicts,
 )
 def test_round_trip_serialization_preserves_all_fields(
     prompt: str,
@@ -260,7 +259,6 @@ def test_round_trip_serialization_preserves_all_fields(
     description: str,
     output_schema: dict,
     retrieval_settings: dict,
-    reranker_config: dict,
 ) -> None:
     """Serializing then deserializing an AIConfigurationVersion preserves all fields.
 
@@ -276,7 +274,6 @@ def test_round_trip_serialization_preserves_all_fields(
         output_schema=output_schema,
         router_threshold=threshold,
         retrieval_settings=retrieval_settings,
-        reranker_config=reranker_config,
         change_description=description,
         created_at="2024-06-15T12:00:00+00:00",
         approved=False,
@@ -295,7 +292,6 @@ def test_round_trip_serialization_preserves_all_fields(
     assert deserialized.output_schema == version.output_schema
     assert deserialized.router_threshold == version.router_threshold
     assert deserialized.retrieval_settings == version.retrieval_settings
-    assert deserialized.reranker_config == version.reranker_config
     assert deserialized.change_description == version.change_description
     assert deserialized.created_at == version.created_at
     assert deserialized.approved == version.approved

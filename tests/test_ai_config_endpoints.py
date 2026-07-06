@@ -28,7 +28,7 @@ _OPERATOR = UserPublic(
 
 
 class _FakeStore:
-    """In-memory stand-in for the S3ArtifactStore used by AIConfigurationStore."""
+    """In-memory stand-in for the GcsArtifactStore used by AIConfigurationStore."""
 
     def __init__(self) -> None:
         self.objects: dict[str, tuple[object, str]] = {}
@@ -66,10 +66,10 @@ class _FakeStore:
                 raise PreconditionFailed(key)
         self.objects[key] = (payload, self._next_etag())
 
-    from rag_system.storage import S3ArtifactStore
+    from rag_system.storage import GcsArtifactStore
 
-    create_json = S3ArtifactStore.create_json
-    update_json_cas = S3ArtifactStore.update_json_cas
+    create_json = GcsArtifactStore.create_json
+    update_json_cas = GcsArtifactStore.update_json_cas
 
 
 @pytest.fixture
@@ -279,7 +279,6 @@ def test_approve_does_not_mutate_governed_settings_via_api(operator_client):
         version_id="v1",
         output_schema={"type": "object"},
         retrieval_settings={"top_k": 10},
-        reranker_config={"model": "cross-encoder"},
     )
 
     response = client.post("/ai-config/cfg-1/versions/v1/approve")
@@ -292,7 +291,6 @@ def test_approve_does_not_mutate_governed_settings_via_api(operator_client):
     assert body["router_threshold"] == 0.75
     assert body["output_schema"] == {"type": "object"}
     assert body["retrieval_settings"] == {"top_k": 10}
-    assert body["reranker_config"] == {"model": "cross-encoder"}
     assert body["change_description"] == "tune thresholds"
 
     # Approval metadata set

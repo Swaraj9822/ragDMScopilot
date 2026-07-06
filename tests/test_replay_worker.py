@@ -80,10 +80,10 @@ class _FakeStore:
                 raise PreconditionFailed(key)
         self.objects[key] = (payload, self._next_etag())
 
-    from rag_system.storage import S3ArtifactStore
+    from rag_system.storage import GcsArtifactStore
 
-    create_json = S3ArtifactStore.create_json
-    update_json_cas = S3ArtifactStore.update_json_cas
+    create_json = GcsArtifactStore.create_json
+    update_json_cas = GcsArtifactStore.update_json_cas
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +224,6 @@ def _seed_approved_version(
         output_schema={},
         router_threshold=0.5,
         retrieval_settings={},
-        reranker_config={},
         change_description="initial approved config",
         created_at="2024-01-01T00:00:00+00:00",
         approved=True,

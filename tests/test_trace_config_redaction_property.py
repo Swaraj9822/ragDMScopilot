@@ -8,7 +8,7 @@ honour the redaction contract:
 - *For any* settings dict with keys matching sensitive patterns (api_key,
   secret, token, credential, password), the output replaces those values with
   the redaction placeholder — including in nested dicts (retrieval_settings,
-  reranker_config).
+  advanced_settings).
 - *For any* settings dict with non-sensitive keys, those values are preserved
   unchanged in the output.
 - *For any* settings dict provided as input, the source dict is never mutated.
@@ -105,7 +105,7 @@ _mixed_settings = st.fixed_dictionaries(
     ).map(lambda pair: {**pair[0], **pair[1]})
 )
 
-# A nested settings dict simulating retrieval_settings / reranker_config.
+# A nested settings dict simulating retrieval_settings / advanced_settings.
 _nested_settings = st.fixed_dictionaries(
     {},
     optional={},
@@ -142,7 +142,7 @@ _nested_settings = st.fixed_dictionaries(
             **parts[0],
             **parts[1],
             "retrieval_settings": {**parts[2], "top_k": 20},
-            "reranker_config": {**parts[3], "enabled": True},
+            "advanced_settings": {**parts[3], "enabled": True},
         }
     )
 )
@@ -216,7 +216,7 @@ def test_source_dict_never_mutated(settings_dict: dict[str, Any]) -> None:
 @settings(max_examples=200)
 @given(settings_dict=_nested_settings)
 def test_nested_dicts_redacted_recursively(settings_dict: dict[str, Any]) -> None:
-    """Sensitive keys inside nested dicts (retrieval_settings, reranker_config) are redacted."""
+    """Sensitive keys inside nested dicts (retrieval_settings, advanced_settings) are redacted."""
     result = redact_settings(settings_dict)
     _check_redaction_recursive(settings_dict, result)
 
@@ -249,11 +249,9 @@ def test_build_trace_config_payload_resolved(version_id: str, settings_dict: dic
         output_schema=settings_dict.get("output_schema", {}),
         router_threshold=settings_dict.get("router_threshold", 0.5),
         retrieval_settings=settings_dict.get("retrieval_settings", {}),
-        reranker_config=settings_dict.get("reranker_config", {}),
         is_resolved=True,
     )
     original_retrieval = copy.deepcopy(rc.retrieval_settings)
-    original_reranker = copy.deepcopy(rc.reranker_config)
 
     payload = build_trace_config_payload(rc)
 
@@ -270,14 +268,8 @@ def test_build_trace_config_payload_resolved(version_id: str, settings_dict: dic
         if _is_sensitive(key):
             assert rs["retrieval_settings"][key] == REDACTED_PLACEHOLDER
 
-    # Sensitive keys in reranker_config are redacted
-    for key in rs.get("reranker_config", {}):
-        if _is_sensitive(key):
-            assert rs["reranker_config"][key] == REDACTED_PLACEHOLDER
-
     # Source never mutated
     assert rc.retrieval_settings == original_retrieval
-    assert rc.reranker_config == original_reranker
 
 
 # Feature: rag-trust-and-observability, Property 31: Traces record the producing configuration version with secrets redacted

@@ -194,7 +194,6 @@ def test_worker_overlaps_blocking_ingestion_stages() -> None:
     service._embedder = BlockingEmbedder()
     service._sparse_encoder = None
     service._index = FakeIndex()
-    service._reranker = None
     service._generator = None
 
     messages = [
@@ -289,6 +288,5 @@ def _service(
     service._embedder = FakeEmbedder()
     service._sparse_encoder = None
     service._index = index
-    service._reranker = None
     service._generator = None
     return service

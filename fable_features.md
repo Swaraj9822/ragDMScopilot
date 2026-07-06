@@ -8,7 +8,7 @@ Agentic clarification - When the router's confidence is low or the query is ambi
 Document summarization & auto-metadata on ingest - During ingestion, generate per-document summaries, topics, and suggested questions (you already show ExamplePrompts). Enables a "browse by topic" view and improves routing.
 Semantic caching - Embed incoming queries and serve cached answers for near-duplicate questions (with a version check against active_version so cache invalidates on re-ingest). Big latency/cost win, and cache hits are traceable as spans.
 Query decomposition for hybrid questions - Break complex questions into sub-queries (multi-hop RAG), answer each, then synthesize. Your router already does rag/db/hybrid fan-out, so this is a natural extension.
-Cost & token analytics - You tally tokens in observability.py. Add per-query cost attribution (Gemini + Titan + Cohere pricing) to traces and a spend chart in Observability.
+Cost & token analytics - You tally tokens in observability.py. Add per-query cost attribution (Gemini pricing) to traces and a spend chart in Observability.
 Anomaly detection on traces - Flag latency regressions, retrieval-score drift, or confidence-score drops over time. You have all the data in Postgres already.
 
 Non-AI Features
@@ -41,7 +41,7 @@ AI-centric (highest leverage first)
 
 6. Query decomposition for hybrid questions Your router already fans out rag/db/hybrid. Extend it to break multi-hop questions into sub-queries, answer each, then synthesize. Natural evolution of the fan-out you built.
 
-Lighter AI adds worth noting: per-document summaries + auto-generated suggested questions at ingest time (feeds ExamplePrompts and a "browse by topic" view), and per-query cost attribution (you already tally tokens in observability.py — add Gemini/Titan/Cohere pricing and a spend chart).
+Lighter AI adds worth noting: per-document summaries + auto-generated suggested questions at ingest time (feeds ExamplePrompts and a "browse by topic" view), and per-query cost attribution (you already tally tokens in observability.py — add Gemini pricing and a spend chart).
 
 Non-AI (adoption and operations)
 Multi-user + RBAC — you're single-user but auth is fully built. Roles (admin/viewer) and per-user document scoping is the biggest unlock if this ever serves more than one operator. Largest effort, but foundational.

@@ -164,7 +164,6 @@ def _service(store: CasStore, index: FakeIndex | None = None) -> RagService:
     service._embedder = FakeEmbedder()
     service._sparse_encoder = None
     service._index = index if index is not None else FakeIndex()
-    service._reranker = None
     service._generator = None
     return service
 

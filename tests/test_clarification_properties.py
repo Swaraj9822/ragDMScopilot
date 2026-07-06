@@ -26,7 +26,7 @@ from rag_system.storage import clarification_key
 class _FakeCreateOnlyStore:
     """Create-only JSON store double.
 
-    Mirrors the ``S3ArtifactStore.create_json`` contract the module depends on:
+    Mirrors the ``GcsArtifactStore.create_json`` contract the module depends on:
     a second write to an existing key is a hard error, so a persisted
     clarification record is immutable and its id is necessarily unique.
     """

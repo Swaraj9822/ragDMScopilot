@@ -37,7 +37,7 @@ class PubSubIngestionQueue:
     """Ingestion queue backed by Google Cloud Pub/Sub.
 
     Publishes ingestion jobs to a topic and pulls them from a subscription.
-    Pub/Sub's *ack deadline* plays the role SQS's *visibility timeout* did: a
+    Pub/Sub's *ack deadline* controls redelivery: a
     pulled-but-unacked message is redelivered after the deadline, so the
     subscription's ack deadline must comfortably exceed worst-case ingestion
     time. A handled message is acknowledged via :meth:`delete`.

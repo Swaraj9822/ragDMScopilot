@@ -4,7 +4,7 @@ This deploys the whole stack to a **single Compute Engine VM** using Docker
 Compose:
 
 - `api` — FastAPI/uvicorn (the HTTP backend)
-- `worker` — the SQS ingestion worker (`python -m rag_system.worker`)
+- `worker` — the Pub/Sub ingestion worker (`python -m rag_system.worker`)
 - `web` — nginx serving the built frontend and reverse-proxying `/api/*` to `api`
 
 Because nginx serves the frontend and the API from the **same origin**, there's
@@ -22,7 +22,7 @@ no CORS to configure and no second domain to manage.
 - A GCP account with the trial credit activated and **billing enabled** on a project
   (Vertex AI calls require billing on; the credit covers it).
 - The `gcloud` CLI installed locally, or use the Cloud Shell in the browser.
-- Your `.env` file with all the AWS / Pinecone / LlamaParse / Vertex AI values
+- Your `.env` file with all the Pinecone / LlamaParse / GCP / Vertex AI / DB values
   filled in. **Do not commit it.**
 
 Set a few shell variables (adjust as you like):
@@ -181,8 +181,9 @@ gcloud compute instances start "$VM_NAME" --zone="$ZONE"   # note: external IP m
 - **Secrets:** `.env` lives on the VM in plaintext. For production, move values to
   **GCP Secret Manager** and inject them, and rotate any credentials that have
   been sitting in the repo workspace.
-- **Cross-cloud:** the data/AI plane (S3, RDS, Bedrock, SQS) is on AWS, so every
-  call leaves GCP. Works fine; just expect some extra latency and AWS egress.
+- **External SaaS:** Pinecone, LlamaParse, and the Neon Postgres DB are external
+  services, so those calls leave GCP. Works fine; just expect some extra latency
+  and egress.
 - **Static IP:** a stopped/started VM gets a new ephemeral IP. Reserve a static
   external IP if you want a stable address:
   `gcloud compute addresses create rag-ip --region=<region>`.

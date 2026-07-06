@@ -430,7 +430,7 @@ class PostgresCopilotExecutor:
             return [dict(row) for row in rows]
 
 
-class BedrockDatabaseCopilot:
+class LlmDatabaseCopilot:
     """Database copilot SQL/answer generation backed by the configured LLM provider."""
 
     def __init__(self, settings: Settings):
@@ -470,7 +470,7 @@ class DatabaseCopilotService:
         self._catalog: CopilotSchemaCatalog | None = None
         self._guard: CopilotSqlGuard | None = None
         self._executor: PostgresCopilotExecutor | None = None
-        self._generator: BedrockDatabaseCopilot | None = None
+        self._generator: LlmDatabaseCopilot | None = None
 
     @property
     def catalog(self) -> CopilotSchemaCatalog:
@@ -491,9 +491,9 @@ class DatabaseCopilotService:
         return self._executor
 
     @property
-    def generator(self) -> BedrockDatabaseCopilot:
+    def generator(self) -> LlmDatabaseCopilot:
         if self._generator is None:
-            self._generator = BedrockDatabaseCopilot(self._settings)
+            self._generator = LlmDatabaseCopilot(self._settings)
         return self._generator
 
     def validate_ready(self) -> None:

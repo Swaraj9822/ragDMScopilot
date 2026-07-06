@@ -52,8 +52,8 @@ def redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
     2. Walks the copy recursively: for any key matching a sensitive pattern (as a
        case-insensitive substring), the corresponding value is replaced with
        :data:`REDACTED_PLACEHOLDER`.
-    3. Recurses into nested ``dict`` values (e.g. ``retrieval_settings``,
-       ``reranker_config``) to redact credentials at any depth.
+    3. Recurses into nested ``dict`` values (e.g. ``retrieval_settings``)
+       to redact credentials at any depth.
 
     Non-dict values at non-sensitive keys are preserved as-is.
     """
@@ -102,7 +102,6 @@ def build_trace_config_payload(resolved_config: Any) -> dict[str, Any]:
         "output_schema": getattr(resolved_config, "output_schema", {}),
         "router_threshold": getattr(resolved_config, "router_threshold", 0.5),
         "retrieval_settings": getattr(resolved_config, "retrieval_settings", {}),
-        "reranker_config": getattr(resolved_config, "reranker_config", {}),
     }
 
     redacted = redact_settings(settings)
