@@ -5,6 +5,7 @@ import time
 import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -28,6 +29,7 @@ from rag_system.models import (
     QueryTraceHit,
     QueryTraceRecord,
     RetrievalHit,
+    UnifiedQueryResponse,
 )
 from rag_system.observability import (
     get_logger,
@@ -1727,11 +1729,55 @@ class RagService:
         thread, so a burst of queries cannot create an unbounded number of
         threads.
         """
+        self._submit_trace_persist(lambda: self._save_query_trace(**kwargs))
+
+    def persist_unified_query_trace(
+        self,
+        *,
+        question: str,
+        document_ids: list[str] | None,
+        response: UnifiedQueryResponse,
+        latency_ms: float | None = None,
+    ) -> None:
+        """Persist a query trace for a database/hybrid unified route (R10).
+
+        The RAG route records its own trace inside :meth:`query` /
+        :meth:`query_stream`. The database route runs entirely in the copilot
+        service, which has no artifact store, so without this the trace
+        investigator's diagnose endpoint returns ``trace_not_found`` for every
+        database answer. The write is best-effort and off the response path,
+        mirroring :meth:`_persist_query_trace_async`.
+        """
+        trace = QueryTraceRecord(
+            trace_id=response.trace_id,
+            question=question,
+            route=response.route,
+            document_ids=document_ids,
+            answer=response.answer,
+            evidence_status=response.evidence_status,
+            confidence=response.confidence,
+            confidence_score=response.confidence_score,
+            insufficient_evidence_reason=response.insufficient_evidence_reason,
+            citations=response.citations,
+            sql=response.sql,
+            claims=response.claims,
+            model_ids=self._query_model_ids(),
+            latency_ms=latency_ms,
+        )
+        self._submit_trace_persist(lambda: self._write_query_trace(trace))
+
+    def _submit_trace_persist(self, write: Callable[[], None]) -> None:
+        """Run a best-effort trace write on the bounded background pool.
+
+        Copies the current trace-id context so background logs stay correlated
+        and falls back to an inline write if the executor has already shut down
+        (e.g. during interpreter teardown) so the trace is not lost.
+        """
         ctx = contextvars.copy_context()
 
         def _run_logged() -> None:
             try:
-                ctx.run(self._save_query_trace, **kwargs)
+                ctx.run(write)
             except Exception:
                 logger.warning(
                     "Background query-trace persistence failed", exc_info=True
@@ -1854,18 +1900,32 @@ class RagService:
             model_ids=self._query_model_ids(),
             latency_ms=latency_ms,
         )
-        key = query_trace_key(response.trace_id)
+        self._write_query_trace(trace)
+
+    def _write_query_trace(self, trace: QueryTraceRecord) -> None:
+        """Persist a fully-built query trace to the artifact store.
+
+        Shared by the RAG path (:meth:`_save_query_trace`) and the
+        database/hybrid path (:meth:`persist_unified_query_trace`) so both
+        routes land under the same ``queries/{trace_id}/trace.json`` key the
+        trace investigator reads.
+        """
+        key = query_trace_key(trace.trace_id)
         self._store.put_json(key, trace.model_dump(mode="json"))
         metrics.increment("rag_query_traces_stored_total", {"route": trace.route})
-        metrics.observe("rag_query_trace_latency_ms", latency_ms, {"route": trace.route})
+        if trace.latency_ms is not None:
+            metrics.observe(
+                "rag_query_trace_latency_ms", trace.latency_ms, {"route": trace.route}
+            )
         logger.info(
             "Stored query trace",
             extra={
-                "trace_id": response.trace_id,
+                "trace_id": trace.trace_id,
                 "s3_key": key,
-                "hit_count": len(top_hits),
-                "citation_count": len(response.citations),
-                "duration_ms": latency_ms,
+                "route": trace.route,
+                "hit_count": len(trace.retrieved_hits),
+                "citation_count": len(trace.citations),
+                "duration_ms": trace.latency_ms,
             },
         )
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { ArrowUp, Square } from "lucide-react";
+import { ArrowUp, PanelRightClose, PanelRightOpen, Square } from "lucide-react";
 import styles from "./Composer.module.css";
 
 interface ComposerProps {
@@ -10,6 +10,8 @@ interface ComposerProps {
   submitting: boolean;
   includeSql: boolean;
   onToggleSql: (value: boolean) => void;
+  showContext: boolean;
+  onToggleContext: () => void;
 }
 
 export function Composer({
@@ -20,6 +22,8 @@ export function Composer({
   submitting,
   includeSql,
   onToggleSql,
+  showContext,
+  onToggleContext,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -71,6 +75,20 @@ export function Composer({
           Enter sends · Shift+Enter adds a line
         </span>
         <div className={styles.actions}>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={onToggleContext}
+            aria-pressed={showContext}
+            aria-label={showContext ? "Hide context panel" : "Show context panel"}
+          >
+            {showContext ? (
+              <PanelRightClose size={14} aria-hidden="true" />
+            ) : (
+              <PanelRightOpen size={14} aria-hidden="true" />
+            )}
+            {showContext ? "Hide panel" : "Context"}
+          </button>
           {submitting && onStop && (
             <button type="button" className="btn btn-sm" onClick={onStop}>
               <Square size={14} aria-hidden="true" />

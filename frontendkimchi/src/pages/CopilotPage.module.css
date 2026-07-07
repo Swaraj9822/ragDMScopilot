@@ -26,9 +26,7 @@
 
 /* Slim toolbar above the conversation holding the context-panel toggle. */
 .toolbar {
-  display: flex;
-  justify-content: flex-end;
-  flex-shrink: 0;
+  display: none;
 }
 
 .scrollArea {

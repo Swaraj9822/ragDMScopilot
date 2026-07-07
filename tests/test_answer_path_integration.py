@@ -26,6 +26,7 @@ from rag_system.models import (
     AnswerSpan,
     Claim,
     ClarificationPrompt,
+    CopilotQueryResponse,
     EvidenceStatus,
     QueryRequest,
     QueryResponse,
@@ -426,3 +427,68 @@ def test_clarify_rejects_empty_reply():
     )
     with pytest.raises(ClarificationReplyRequiredError):
         processor.process(clarification_id=prompt.clarification_id, reply="   ")
+
+
+# ---------------------------------------------------------------------------
+# /ask — database route persists a trace (regression: trace_not_found)
+# ---------------------------------------------------------------------------
+
+
+class _DatabaseClassifier:
+    """Classifier that always routes to the database copilot."""
+
+    def classify(self, question: str, tables) -> RoutingDecision:
+        return RoutingDecision(
+            route=QueryRoute.database, reasoning="metrics", confidence=0.9
+        )
+
+
+class _FakeCopilot:
+    """Minimal copilot returning a grounded database answer with a trace id."""
+
+    catalog = SimpleNamespace(table_names=["sales_invoice"])
+
+    def query(self, request) -> CopilotQueryResponse:
+        return CopilotQueryResponse(
+            answer=f"DB answer to: {request.question}",
+            mode="database",
+            evidence_status="grounded",
+            trace_id="db-trace-1",
+            confidence_score=0.86,
+            sql="SELECT customer, SUM(total) FROM sales_invoice GROUP BY customer",
+            rows=[{"customer": "Acme", "sum": 100}],
+        )
+
+
+class _RecordingRag(_FakeRag):
+    """RAG fake that records unified-trace persistence calls from the router."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.persisted: list[UnifiedQueryResponse] = []
+
+    def persist_unified_query_trace(self, *, question, document_ids, response, latency_ms=None):
+        self.persisted.append(response)
+
+
+def test_database_route_persists_query_trace():
+    """A database-routed answer records a query trace so the trace investigator
+    can diagnose it (regression: diagnose returned ``trace_not_found`` for every
+    database answer because no trace was persisted)."""
+    rag = _RecordingRag()
+    router = _build_router(classifier=_DatabaseClassifier(), rag=rag)
+    router._copilot = _FakeCopilot()
+    router._copilot_available = True
+    router._table_names = ["sales_invoice"]
+
+    result = router.query(UnifiedQueryRequest(question="Top customer by revenue?"))
+
+    assert isinstance(result, UnifiedQueryResponse)
+    assert result.route == "database"
+    assert result.trace_id == "db-trace-1"
+
+    # The router persisted exactly one trace for this database answer, keyed to
+    # the same trace id the client will pass to the diagnose endpoint.
+    assert len(rag.persisted) == 1
+    assert rag.persisted[0].trace_id == "db-trace-1"
+    assert rag.persisted[0].route == "database"

@@ -682,7 +682,7 @@ class AgenticRouter:
         with timed(logger, "copilot query (routed)", **log_extra):
             copilot_response = self._copilot.query(copilot_request)
 
-        return UnifiedQueryResponse(
+        response = UnifiedQueryResponse(
             answer=copilot_response.answer,
             route="database",
             evidence_status=copilot_response.evidence_status,
@@ -693,6 +693,18 @@ class AgenticRouter:
             data_sources=copilot_response.data_sources,
             routing_reasoning=decision.reasoning,
         )
+
+        # The database route has no RagService leaf call to record a trace, so
+        # persist one here — otherwise the trace investigator's diagnose endpoint
+        # returns ``trace_not_found`` for every database answer (R10.2).
+        persist = getattr(self._rag, "persist_unified_query_trace", None)
+        if persist is not None:
+            persist(
+                question=request.question,
+                document_ids=request.document_ids,
+                response=response,
+            )
+        return response
 
     def _route_hybrid(
         self,
