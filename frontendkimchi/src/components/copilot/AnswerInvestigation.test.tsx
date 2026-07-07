@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AnswerInvestigation } from "./AnswerInvestigation";
 import { AnswerCard } from "./AnswerCard";
