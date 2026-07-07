@@ -33,23 +33,30 @@ interface AutoDashboardProps {
 }
 
 /**
- * A small qualitative palette for chart series and pie slices. Colors are
- * pulled from CSS custom properties where available and fall back to fixed
- * hex values so charts still render in a bare test environment.
+ * A qualitative palette for chart series, pie slices and per-category bars.
+ * Anchored on the app accent and extended with distinct, legible hues so a
+ * single-series categorical chart is no longer a monotone wall of one color.
  */
 const SERIES_COLORS = [
-  "var(--accent, #2563eb)",
-  "#16a34a",
-  "#d97706",
-  "#dc2626",
-  "#7c3aed",
-  "#0891b2",
+  "#43d6b5", // accent teal
+  "#79a9ff", // info blue
+  "#f4b740", // amber
+  "#c084fc", // violet
+  "#f87171", // red
+  "#4ade80", // green
+  "#22d3ee", // cyan
+  "#fb923c", // orange
 ];
 
+/** Neutral slate that reads acceptably on both the dark and light themes. */
+const AXIS_COLOR = "#8b97a4";
+const GRID_COLOR = "rgba(148, 163, 184, 0.16)";
+
 /**
- * Format a locally computed numeric value for display. Whole numbers render
- * without decimals; fractional values are rounded to at most three decimals.
- * `null` (no data / uncomputable) renders as an em dash.
+ * Format a locally computed numeric value at full precision. Whole numbers
+ * render without decimals; fractional values are rounded to at most three
+ * decimals. `null` (no data / uncomputable) renders as an em dash. Used by the
+ * data-table equivalent and tooltips where exact figures matter.
  */
 function formatValue(value: number | null): string {
   if (value === null || !Number.isFinite(value)) {
@@ -61,9 +68,77 @@ function formatValue(value: number | null): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 3 });
 }
 
+/**
+ * Format a value compactly for headline display (KPI cards, axis ticks) so
+ * large aggregates fit their container: 82_727_786.9 → "82.73M". Small values
+ * (< 10_000) keep their full form so precision is not lost where it fits.
+ */
+function formatCompact(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "—";
+  }
+  if (Math.abs(value) >= 10_000) {
+    return value.toLocaleString(undefined, {
+      notation: "compact",
+      maximumFractionDigits: 2,
+    });
+  }
+  return formatValue(value);
+}
+
 /** A human-readable series label, e.g. `sum(amount)`. */
 function seriesLabel(op: string, column: string): string {
   return `${op}(${column})`;
+}
+
+// ---------------------------------------------------------------------------
+// Tooltip
+// ---------------------------------------------------------------------------
+
+interface TooltipEntry {
+  name?: string;
+  value?: number | string | null;
+  color?: string;
+}
+
+/**
+ * A themed tooltip replacing recharts' bright default box, so hovered values
+ * are legible on the dark surface and share the dashboard's visual language.
+ */
+function ChartTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: TooltipEntry[];
+  label?: string | number;
+}) {
+  if (!active || !payload || payload.length === 0) {
+    return null;
+  }
+  return (
+    <div className={styles.tooltip}>
+      {label !== undefined && label !== "" && (
+        <p className={styles.tooltipLabel}>{label}</p>
+      )}
+      {payload.map((entry, index) => (
+        <p key={`${entry.name}-${index}`} className={styles.tooltipRow}>
+          <span
+            className={styles.tooltipDot}
+            style={{ background: entry.color }}
+            aria-hidden="true"
+          />
+          <span className={styles.tooltipName}>{entry.name}</span>
+          <span className={styles.tooltipValue}>
+            {formatValue(
+              typeof entry.value === "number" ? entry.value : null,
+            )}
+          </span>
+        </p>
+      ))}
+    </div>
+  );
 }
 
 /**
@@ -103,10 +178,12 @@ export function AutoDashboard({ spec, resultSet }: AutoDashboardProps) {
   if (!hasChartableData) {
     return (
       <section className={styles.dashboard} aria-label="Auto dashboard">
-        <h2 className={styles.heading}>
-          <BarChart3 size={16} aria-hidden="true" />
-          Auto dashboard
-        </h2>
+        <header className={styles.header}>
+          <h2 className={styles.heading}>
+            <BarChart3 size={16} aria-hidden="true" />
+            Auto dashboard
+          </h2>
+        </header>
         <EmptyState
           icon={BarChart3}
           title="No chartable data"
@@ -121,21 +198,38 @@ export function AutoDashboard({ spec, resultSet }: AutoDashboardProps) {
 
   return (
     <section className={styles.dashboard} aria-label="Auto dashboard">
-      <h2 className={styles.heading}>
-        <BarChart3 size={16} aria-hidden="true" />
-        Auto dashboard
-      </h2>
-
-      {/* At most one insight line, ≤ 200 chars (R10.5). */}
-      {computed.insight && <p className={styles.insight}>{computed.insight}</p>}
+      <header className={styles.header}>
+        <h2 className={styles.heading}>
+          <BarChart3 size={16} aria-hidden="true" />
+          Auto dashboard
+        </h2>
+        {/* At most one insight line, ≤ 200 chars (R10.5). */}
+        {computed.insight && <p className={styles.insight}>{computed.insight}</p>}
+      </header>
 
       {/* KPI cards — only computable ones are shown as values (R10.4). */}
       {computableKpis.length > 0 && (
         <div className={styles.kpiGrid}>
           {computableKpis.map((kpi, index) => (
-            <div key={`${kpi.label}-${index}`} className={styles.kpiCard}>
-              <span className={styles.kpiLabel}>{kpi.label}</span>
-              <span className={styles.kpiValue}>{formatValue(kpi.value)}</span>
+            <div
+              key={`${kpi.label}-${index}`}
+              className={styles.kpiCard}
+              style={{
+                // A thin accent rail cycles through the palette so adjacent
+                // cards are visually distinct and scannable.
+                ["--kpi-accent" as string]:
+                  SERIES_COLORS[index % SERIES_COLORS.length],
+              }}
+            >
+              <span className={styles.kpiLabel} title={kpi.label}>
+                {kpi.label}
+              </span>
+              <span
+                className={styles.kpiValue}
+                title={formatValue(kpi.value)}
+              >
+                {formatCompact(kpi.value)}
+              </span>
               <span className={styles.kpiOp}>{seriesLabel(kpi.op, kpi.column)}</span>
             </div>
           ))}
@@ -168,7 +262,7 @@ function UncomputableNotes({
   charts: ComputedChart[];
 }) {
   return (
-    <div role="status">
+    <div className={styles.notes} role="status">
       {kpis.map((kpi, index) => (
         <p key={`kpi-${kpi.label}-${index}`} className={styles.uncomputableNote}>
           <AlertTriangle size={14} aria-hidden="true" />
@@ -252,7 +346,9 @@ function ChartBlock({ chart }: { chart: ComputedChart }) {
 
 /**
  * Build the recharts element for a computed chart. Bar/line charts render every
- * series; a pie chart renders its first series' value per group.
+ * series; a pie chart renders its first series' value per group. Axes, grid and
+ * tooltip share a themed, low-contrast style, and a single-series bar chart
+ * colors each category distinctly so the shape of the data is easier to read.
  */
 function renderChart(chart: ComputedChart) {
   if (chart.type === "pie") {
@@ -265,14 +361,17 @@ function renderChart(chart: ComputedChart) {
       : [];
     return (
       <PieChart>
-        <Tooltip />
-        <Legend />
+        <Tooltip content={<ChartTooltip />} />
+        <Legend iconType="circle" />
         <Pie
           data={pieData}
           dataKey="value"
           nameKey="name"
-          outerRadius="80%"
-          label
+          innerRadius="45%"
+          outerRadius="78%"
+          paddingAngle={2}
+          stroke="var(--bg-surface)"
+          strokeWidth={2}
         >
           {pieData.map((_, index) => (
             <Cell
@@ -287,12 +386,23 @@ function renderChart(chart: ComputedChart) {
 
   if (chart.type === "line") {
     return (
-      <LineChart data={chart.data}>
-        <CartesianGrid strokeDasharray="3 3" />
-        <XAxis dataKey="xLabel" />
-        <YAxis />
-        <Tooltip />
-        <Legend />
+      <LineChart data={chart.data} margin={{ top: 8, right: 16, bottom: 4, left: 8 }}>
+        <CartesianGrid stroke={GRID_COLOR} vertical={false} />
+        <XAxis
+          dataKey="xLabel"
+          tick={{ fill: AXIS_COLOR, fontSize: 11 }}
+          tickLine={false}
+          axisLine={{ stroke: GRID_COLOR }}
+        />
+        <YAxis
+          tick={{ fill: AXIS_COLOR, fontSize: 11 }}
+          tickLine={false}
+          axisLine={false}
+          width={56}
+          tickFormatter={(v: number) => formatCompact(v)}
+        />
+        <Tooltip content={<ChartTooltip />} />
+        {chart.series.length > 1 && <Legend iconType="line" />}
         {chart.series.map((s, index) => (
           <Line
             key={s.key}
@@ -300,6 +410,9 @@ function renderChart(chart: ComputedChart) {
             dataKey={s.key}
             name={seriesLabel(s.op, s.column)}
             stroke={SERIES_COLORS[index % SERIES_COLORS.length]}
+            strokeWidth={2}
+            dot={{ r: 3, strokeWidth: 0 }}
+            activeDot={{ r: 5 }}
           />
         ))}
       </LineChart>
@@ -307,20 +420,45 @@ function renderChart(chart: ComputedChart) {
   }
 
   // Default: bar chart.
+  const singleSeries = chart.series.length === 1;
   return (
-    <BarChart data={chart.data}>
-      <CartesianGrid strokeDasharray="3 3" />
-      <XAxis dataKey="xLabel" />
-      <YAxis />
-      <Tooltip />
-      <Legend />
+    <BarChart data={chart.data} margin={{ top: 8, right: 16, bottom: 4, left: 8 }}>
+      <CartesianGrid stroke={GRID_COLOR} vertical={false} />
+      <XAxis
+        dataKey="xLabel"
+        tick={{ fill: AXIS_COLOR, fontSize: 11 }}
+        tickLine={false}
+        axisLine={{ stroke: GRID_COLOR }}
+        interval={0}
+      />
+      <YAxis
+        tick={{ fill: AXIS_COLOR, fontSize: 11 }}
+        tickLine={false}
+        axisLine={false}
+        width={56}
+        tickFormatter={(v: number) => formatCompact(v)}
+      />
+      <Tooltip
+        content={<ChartTooltip />}
+        cursor={{ fill: "rgba(148, 163, 184, 0.08)" }}
+      />
+      {!singleSeries && <Legend iconType="circle" />}
       {chart.series.map((s, index) => (
         <Bar
           key={s.key}
           dataKey={s.key}
           name={seriesLabel(s.op, s.column)}
           fill={SERIES_COLORS[index % SERIES_COLORS.length]}
-        />
+          radius={[6, 6, 0, 0]}
+          maxBarSize={64}
+        >
+          {/* When there is a single series, color each category distinctly so
+              the bars are no longer a monotone block. */}
+          {singleSeries &&
+            chart.data.map((_, i) => (
+              <Cell key={i} fill={SERIES_COLORS[i % SERIES_COLORS.length]} />
+            ))}
+        </Bar>
       ))}
     </BarChart>
   );

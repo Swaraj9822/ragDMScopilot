@@ -154,8 +154,13 @@ describe("SqlLabPage history-entry selection (R11.5)", () => {
     const editor = await typeQuery(user, "SELECT 1");
     expect(editor).toHaveValue("SELECT 1");
 
-    const historySection = screen.getByRole("region", { name: /query history/i });
-    await user.click(within(historySection).getByRole("button", { name: stored }));
+    // The Query history panel is collapsed by default; expand it, then select
+    // the stored entry.
+    const sidebar = screen.getByRole("complementary", { name: /sql lab tools/i });
+    await user.click(
+      within(sidebar).getByRole("button", { name: /query history/i }),
+    );
+    await user.click(within(sidebar).getByRole("button", { name: stored }));
 
     // The editor content is fully replaced with the stored statement.
     expect(editor).toHaveValue(stored);

@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useReducer, useRef, useState } from "react";
 import {
   AlertTriangle,
   BarChart3,
+  ChevronDown,
   Database,
   Download,
   History,
@@ -175,6 +176,18 @@ export default function SqlLabPage() {
   const [viewState, dispatch] = useReducer(sqlLabReducer, initialSqlLabViewState);
   // Polite announcement text for assistive technology (R5.9).
   const [announcement, setAnnouncement] = useState("");
+
+  // Which of the collapsible left-side panels are expanded. Both start
+  // collapsed so the operator opts in by clicking the corresponding button;
+  // neither Schema nor Query history is permanently displayed.
+  const [openPanels, setOpenPanels] = useState<{
+    schema: boolean;
+    history: boolean;
+  }>({ schema: false, history: false });
+
+  function togglePanel(panel: "schema" | "history") {
+    setOpenPanels((prev) => ({ ...prev, [panel]: !prev[panel] }));
+  }
 
   const abortRef = useRef<AbortController | null>(null);
   const analysisAbortRef = useRef<AbortController | null>(null);
@@ -359,57 +372,143 @@ export default function SqlLabPage() {
       </div>
 
       <div className={styles.body}>
-        {/* ── Schema sidebar (R7.5–R7.7) ── */}
-        <aside className={styles.sidebar} aria-label="Database schema">
-          <h2 className={styles.sidebarHeading}>Schema</h2>
-          {schemaState.kind === "loading" && (
-            <div
-              className={styles.sidebarSkeleton}
-              data-testid="sql-lab-schema-skeleton"
-              aria-hidden="true"
+        {/* ── Left rail: selectable, expandable panels ── The Schema and Query
+            history panels are no longer permanently displayed; each is a
+            button that expands its content only after the operator clicks it. */}
+        <aside className={styles.sidebar} aria-label="SQL Lab tools">
+          {/* ── Schema panel (R7.5–R7.7) ── */}
+          <div className={styles.panel}>
+            <button
+              type="button"
+              className={styles.panelToggle}
+              onClick={() => togglePanel("schema")}
+              aria-expanded={openPanels.schema}
+              aria-controls="sql-lab-schema-panel"
             >
-              <Skeleton height={16} width="70%" />
-              <Skeleton height={14} width="90%" />
-              <Skeleton height={14} width="60%" />
-            </div>
-          )}
+              <Database size={14} aria-hidden="true" />
+              <span className={styles.panelTitle}>Schema</span>
+              <ChevronDown
+                size={16}
+                aria-hidden="true"
+                className={
+                  openPanels.schema ? styles.chevronOpen : styles.chevron
+                }
+              />
+            </button>
 
-          {schemaState.kind === "error" && (
-            <p className={styles.sidebarError} role="status">
-              <AlertTriangle size={14} aria-hidden="true" />
-              {schemaState.message}
-            </p>
-          )}
+            {openPanels.schema && (
+              <div
+                id="sql-lab-schema-panel"
+                className={styles.panelBody}
+              >
+                {schemaState.kind === "loading" && (
+                  <div
+                    className={styles.sidebarSkeleton}
+                    data-testid="sql-lab-schema-skeleton"
+                    aria-hidden="true"
+                  >
+                    <Skeleton height={16} width="70%" />
+                    <Skeleton height={14} width="90%" />
+                    <Skeleton height={14} width="60%" />
+                  </div>
+                )}
 
-          {schemaState.kind === "loaded" &&
-            (schemaState.tables.length === 0 ? (
-              <p className={styles.sidebarEmpty}>No tables are available.</p>
-            ) : (
-              <ul className={styles.tableList}>
-                {schemaState.tables.map((table) => (
-                  <li key={table.name} className={styles.tableItem}>
-                    {/* Selecting a table replaces the editor with its canonical
-                        browse statement (R7.8). A real button keeps the control
-                        focusable and keyboard-operable. */}
-                    <button
-                      type="button"
-                      className={styles.tableName}
-                      onClick={() => handleSelectTable(table.name)}
-                    >
-                      {table.name}
-                    </button>
-                    <ul className={styles.columnList}>
-                      {table.columns.map((column) => (
-                        <li key={column.name} className={styles.columnItem}>
-                          <span className={styles.columnName}>{column.name}</span>
-                          <span className={styles.columnType}>{column.type}</span>
+                {schemaState.kind === "error" && (
+                  <p className={styles.sidebarError} role="status">
+                    <AlertTriangle size={14} aria-hidden="true" />
+                    {schemaState.message}
+                  </p>
+                )}
+
+                {schemaState.kind === "loaded" &&
+                  (schemaState.tables.length === 0 ? (
+                    <p className={styles.sidebarEmpty}>
+                      No tables are available.
+                    </p>
+                  ) : (
+                    <ul className={styles.tableList}>
+                      {schemaState.tables.map((table) => (
+                        <li key={table.name} className={styles.tableItem}>
+                          {/* Selecting a table replaces the editor with its
+                              canonical browse statement (R7.8). A real button
+                              keeps the control focusable and keyboard-operable. */}
+                          <button
+                            type="button"
+                            className={styles.tableName}
+                            onClick={() => handleSelectTable(table.name)}
+                          >
+                            {table.name}
+                          </button>
+                          <ul className={styles.columnList}>
+                            {table.columns.map((column) => (
+                              <li
+                                key={column.name}
+                                className={styles.columnItem}
+                              >
+                                <span className={styles.columnName}>
+                                  {column.name}
+                                </span>
+                                <span className={styles.columnType}>
+                                  {column.type}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
                         </li>
                       ))}
                     </ul>
-                  </li>
-                ))}
-              </ul>
-            ))}
+                  ))}
+              </div>
+            )}
+          </div>
+
+          {/* ── Query history panel (R11.3–R11.5) ── Selecting an entry
+              replaces the entire editor content with the stored SQL (R11.5). */}
+          <div className={styles.panel}>
+            <button
+              type="button"
+              className={styles.panelToggle}
+              onClick={() => togglePanel("history")}
+              aria-expanded={openPanels.history}
+              aria-controls="sql-lab-history-panel"
+            >
+              <History size={14} aria-hidden="true" />
+              <span className={styles.panelTitle}>Query history</span>
+              <ChevronDown
+                size={16}
+                aria-hidden="true"
+                className={
+                  openPanels.history ? styles.chevronOpen : styles.chevron
+                }
+              />
+            </button>
+
+            {openPanels.history && (
+              <div
+                id="sql-lab-history-panel"
+                className={styles.panelBody}
+              >
+                {history.length === 0 ? (
+                  <p className={styles.sidebarEmpty}>No queries yet.</p>
+                ) : (
+                  <ul className={styles.historyList}>
+                    {history.map((entry, index) => (
+                      <li key={`${index}-${entry}`} className={styles.historyItem}>
+                        <button
+                          type="button"
+                          className={styles.historyButton}
+                          onClick={() => handleSelectHistory(entry)}
+                          title={entry}
+                        >
+                          {entry}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
         </aside>
 
         {/* ── Main column: editor + results ── */}
@@ -488,31 +587,6 @@ export default function SqlLabPage() {
               </p>
             )}
           </div>
-
-          {/* ── Query history (R11.3–R11.5) ── Selecting an entry replaces the
-              entire editor content with the stored SQL (R11.5). */}
-          {history.length > 0 && (
-            <section className={styles.history} aria-label="Query history">
-              <h2 className={styles.historyHeading}>
-                <History size={14} aria-hidden="true" />
-                Query history
-              </h2>
-              <ul className={styles.historyList}>
-                {history.map((entry, index) => (
-                  <li key={`${index}-${entry}`} className={styles.historyItem}>
-                    <button
-                      type="button"
-                      className={styles.historyButton}
-                      onClick={() => handleSelectHistory(entry)}
-                      title={entry}
-                    >
-                      {entry}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
 
           {/* ── Results (exactly one state at a time, R6.6) ── */}
           {viewState.kind === "loading" && (

@@ -4,7 +4,6 @@ import type { BrowserDocumentEntry } from "../api/types";
 import { replaceDocument, deleteDocument } from "../api/documents";
 import { ApiError } from "../api/client";
 import { PageHeader } from "../components/common/PageHeader";
-import { EmptyState } from "../components/common/EmptyState";
 import { ConfirmDialog } from "../components/common/ConfirmDialog";
 import { UploadDropZone } from "../components/documents/UploadDropZone";
 import { UploadQueue } from "../components/documents/UploadQueue";
@@ -85,89 +84,101 @@ export default function DocumentsPage() {
 
         <div className={styles.right}>
           {/* ── Server corpus listing (R4) ── */}
-          <h2 className={styles.sectionTitle}>Corpus</h2>
-          <p className="meta" style={{ marginBottom: "var(--space-3)" }}>
-            All documents in the backend corpus, fetched from the server.
-          </p>
-
-          {corpus.loading && corpus.documents.length === 0 ? (
-            <div className={styles.corpusLoading} aria-busy="true" aria-label="Loading corpus">
-              <Loader2 size={20} className={styles.spinner} aria-hidden="true" />
-              <span className="meta">Loading corpus…</span>
+          <section className={styles.panel}>
+            <div className={styles.panelHead}>
+              <h2 className={styles.panelTitle}>Corpus</h2>
+              <p className={styles.panelDesc}>
+                All documents in the backend corpus, fetched from the server.
+              </p>
             </div>
-          ) : corpus.documents.length === 0 && !corpus.error ? (
-            <EmptyState
-              icon={Library}
-              title="No documents in the corpus."
-              body="No documents match the current view. Upload a file to get started."
-            />
-          ) : (
-            <>
-              <div className={styles.cards}>
-                {corpus.documents.map((doc) => (
-                  <CorpusDocumentCard key={doc.id} document={doc} />
-                ))}
-              </div>
 
-              {corpus.hasMore && (
+            {corpus.loading && corpus.documents.length === 0 ? (
+              <div className={styles.corpusLoading} aria-busy="true" aria-label="Loading corpus">
+                <Loader2 size={20} className={styles.spinner} aria-hidden="true" />
+                <span className="meta">Loading corpus…</span>
+              </div>
+            ) : corpus.documents.length === 0 && !corpus.error ? (
+              <div className={styles.emptyInline}>
+                <Library size={28} className={styles.emptyInlineIcon} aria-hidden="true" />
+                <p className={styles.emptyInlineTitle}>No documents in the corpus.</p>
+                <p className={styles.emptyInlineBody}>
+                  No documents match the current view. Upload a file to get started.
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className={styles.cards}>
+                  {corpus.documents.map((doc) => (
+                    <CorpusDocumentCard key={doc.id} document={doc} />
+                  ))}
+                </div>
+
+                {corpus.hasMore && (
+                  <button
+                    type="button"
+                    className={`btn ${styles.loadMoreBtn}`}
+                    onClick={corpus.loadMore}
+                    disabled={corpus.loadingMore}
+                    aria-label="Load more documents"
+                  >
+                    {corpus.loadingMore ? (
+                      <Loader2 size={14} className={styles.spinner} aria-hidden="true" />
+                    ) : (
+                      <ChevronDown size={14} aria-hidden="true" />
+                    )}
+                    {corpus.loadingMore ? "Loading…" : "Load more"}
+                  </button>
+                )}
+              </>
+            )}
+
+            {corpus.error && (
+              <div className={styles.corpusError} role="alert">
+                <AlertTriangle size={16} aria-hidden="true" />
+                <span>Could not retrieve the corpus. {corpus.error}</span>
                 <button
                   type="button"
-                  className={`btn ${styles.loadMoreBtn}`}
-                  onClick={corpus.loadMore}
-                  disabled={corpus.loadingMore}
-                  aria-label="Load more documents"
+                  className="btn btn-sm"
+                  onClick={() => corpus.refresh()}
                 >
-                  {corpus.loadingMore ? (
-                    <Loader2 size={14} className={styles.spinner} aria-hidden="true" />
-                  ) : (
-                    <ChevronDown size={14} aria-hidden="true" />
-                  )}
-                  {corpus.loadingMore ? "Loading…" : "Load more"}
+                  Retry
                 </button>
-              )}
-            </>
-          )}
-
-          {corpus.error && (
-            <div className={styles.corpusError} role="alert">
-              <AlertTriangle size={16} aria-hidden="true" />
-              <span>Could not retrieve the corpus. {corpus.error}</span>
-              <button
-                type="button"
-                className="btn btn-sm"
-                onClick={() => corpus.refresh()}
-              >
-                Retry
-              </button>
-            </div>
-          )}
+              </div>
+            )}
+          </section>
 
           {/* ── Browser-local uploads ── */}
-          <h2 className={styles.sectionTitle} style={{ marginTop: "var(--space-6)" }}>
-            This browser&apos;s uploads
-          </h2>
-          <p className="meta" style={{ marginBottom: "var(--space-3)" }}>
-            Records uploaded or tracked in this browser. This is not the full corpus.
-          </p>
-          {entries.length === 0 ? (
-            <EmptyState
-              icon={FileStack}
-              title="No uploads saved in this browser yet."
-              body="Upload a file or track an existing document ID to see it here."
-            />
-          ) : (
-            <div className={styles.cards}>
-              {entries.map((entry) => (
-                <DocumentCard
-                  key={entry.document.id}
-                  entry={entry}
-                  onReplace={handleReplace}
-                  onDelete={setPendingDelete}
-                  onRemoveLocal={remove}
-                />
-              ))}
+          <section className={styles.panel}>
+            <div className={styles.panelHead}>
+              <h2 className={styles.panelTitle}>This browser&apos;s uploads</h2>
+              <p className={styles.panelDesc}>
+                Records uploaded or tracked in this browser. This is not the full corpus.
+              </p>
             </div>
-          )}
+            {entries.length === 0 ? (
+              <div className={styles.emptyInline}>
+                <FileStack size={28} className={styles.emptyInlineIcon} aria-hidden="true" />
+                <p className={styles.emptyInlineTitle}>
+                  No uploads saved in this browser yet.
+                </p>
+                <p className={styles.emptyInlineBody}>
+                  Upload a file or track an existing document ID to see it here.
+                </p>
+              </div>
+            ) : (
+              <div className={styles.cards}>
+                {entries.map((entry) => (
+                  <DocumentCard
+                    key={entry.document.id}
+                    entry={entry}
+                    onReplace={handleReplace}
+                    onDelete={setPendingDelete}
+                    onRemoveLocal={remove}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
         </div>
       </div>
 

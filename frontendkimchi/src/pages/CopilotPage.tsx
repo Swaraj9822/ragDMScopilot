@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { askStream, forgetConversation } from "../api/copilot";
 import { ApiError, NetworkError, TimeoutError } from "../api/client";
 import { useCopilotHistory } from "../hooks/useCopilotHistory";
@@ -52,6 +53,9 @@ export default function CopilotPage() {
 
   const [draft, setDraft] = useState("");
   const [includeSql, setIncludeSql] = useState(false);
+  // The context panel (selected documents + conversation controls) is hidden by
+  // default so the conversation gets the full width; it can be toggled open.
+  const [showContext, setShowContext] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [error, setError] = useState<CopilotError | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -203,8 +207,24 @@ export default function CopilotPage() {
   const isEmpty = exchanges.length === 0 && pendingQuestion === null;
 
   return (
-    <div className={styles.layout}>
+    <div className={`${styles.layout} ${showContext ? styles.withContext : ""}`}>
       <div className={styles.mainColumn}>
+        <div className={styles.toolbar}>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setShowContext((v) => !v)}
+            aria-pressed={showContext}
+            aria-label={showContext ? "Hide context panel" : "Show context panel"}
+          >
+            {showContext ? (
+              <PanelRightClose size={14} aria-hidden="true" />
+            ) : (
+              <PanelRightOpen size={14} aria-hidden="true" />
+            )}
+            {showContext ? "Hide panel" : "Context"}
+          </button>
+        </div>
         <div className={styles.scrollArea}>
           {isEmpty ? (
             <ExamplePrompts onPick={(text) => setDraft(text)} />
@@ -235,15 +255,17 @@ export default function CopilotPage() {
         </div>
       </div>
 
-      <ContextRail
-        selectedIds={selectedIds}
-        onRemove={removeSelected}
-        historyCount={exchanges.length}
-        conversationId={conversationId}
-        onNewTopic={() => setConfirmClear(true)}
-        onForgetContext={handleForgetContext}
-        busy={streaming}
-      />
+      {showContext && (
+        <ContextRail
+          selectedIds={selectedIds}
+          onRemove={removeSelected}
+          historyCount={exchanges.length}
+          conversationId={conversationId}
+          onNewTopic={() => setConfirmClear(true)}
+          onForgetContext={handleForgetContext}
+          busy={streaming}
+        />
+      )}
 
       <ConfirmDialog
         open={confirmClear}

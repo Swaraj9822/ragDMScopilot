@@ -28,27 +28,74 @@
   min-width: 0;
 }
 
-/* ── Schema sidebar (R7.5–R7.7) ── */
+/* ── Left rail: collapsible Schema / Query history panels ── */
 
 .sidebar {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-4);
+  position: sticky;
+  top: var(--space-4);
+}
+
+.panel {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius);
   box-shadow: var(--shadow-card);
-  max-height: 70vh;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
-.sidebarHeading {
+.panelToggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+.panelToggle:hover {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.05));
+  color: var(--text-primary);
+}
+
+.panelToggle:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent, #2563eb));
+  outline-offset: -2px;
+}
+
+.panelTitle {
+  flex: 1;
+  text-align: left;
+}
+
+.chevron,
+.chevronOpen {
+  flex-shrink: 0;
+  transition: transform 0.15s ease;
+}
+
+.chevronOpen {
+  transform: rotate(180deg);
+}
+
+.panelBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border-top: 1px solid var(--border-default);
+  max-height: 60vh;
+  overflow-y: auto;
 }
 
 .sidebarSkeleton {
@@ -214,27 +261,6 @@
 }
 
 /* ── Query history (R11.3–R11.5) ── */
-
-.history {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-4);
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius);
-}
-
-.historyHeading {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
 
 .historyList {
   list-style: none;

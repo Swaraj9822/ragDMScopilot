@@ -1,40 +1,68 @@
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
+  grid-template-columns: minmax(0, 1fr);
+  /* A single full-height row so the main column fills the available viewport
+     height. This lets the conversation scroll internally while the composer
+     stays pinned to the bottom and never shifts as content grows. */
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--space-6);
-  align-items: start;
-  min-height: calc(100vh - 160px);
+  height: calc(100vh - 160px);
+}
+
+/* When the context panel is toggled on, make room for it on the right. */
+.layout.withContext {
+  grid-template-columns: minmax(0, 1fr) 300px;
 }
 
 .mainColumn {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-3);
   min-width: 0;
+  /* Allow the scroll area to shrink below its content size so it can scroll
+     instead of pushing the composer around. */
+  min-height: 0;
+}
+
+/* Slim toolbar above the conversation holding the context-panel toggle. */
+.toolbar {
+  display: flex;
+  justify-content: flex-end;
+  flex-shrink: 0;
 }
 
 .scrollArea {
-  min-height: 240px;
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* A little breathing room so content doesn't sit under the scrollbar. */
+  padding-right: var(--space-2);
 }
 
 .composerArea {
-  position: sticky;
-  bottom: var(--space-4);
-  z-index: var(--z-sticky);
+  /* Pinned to the bottom of the main column by the flexing scroll area above.
+     It has a fixed slot and never moves as the answer streams in. */
+  flex-shrink: 0;
 }
 
 @media (max-width: 900px) {
-  .layout {
+  .layout,
+  .layout.withContext {
     grid-template-columns: 1fr;
-    min-height: auto;
+    grid-template-rows: auto;
+    height: auto;
+  }
+  .scrollArea {
+    overflow-y: visible;
+    padding-right: 0;
   }
   .composerArea {
     position: sticky;
     bottom: 0;
-    padding-bottom: env(safe-area-inset-bottom, 0);
+    z-index: var(--z-sticky);
     background: var(--bg-canvas);
     margin: 0 calc(-1 * var(--space-3));
     padding: var(--space-3);
+    padding-bottom: env(safe-area-inset-bottom, 0);
   }
 }
