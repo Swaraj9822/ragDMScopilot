@@ -93,7 +93,7 @@ def main() -> int:
     print(f"OK: {action}")
     print(f"    email    = {email}")
     print(f"    id       = {user_id}")
-    print(f"    operator = True")
+    print("    operator = True")
     return 0
 
 
