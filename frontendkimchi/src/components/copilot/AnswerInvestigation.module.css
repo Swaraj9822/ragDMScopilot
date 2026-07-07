@@ -1,0 +1,316 @@
+/* AnswerInvestigation — the "AI Retrieval Investigator" panel. */
+
+.investigator {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Trigger button ── */
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  align-self: flex-start;
+  padding: var(--space-2) var(--space-3);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--motion-fast, 150ms) ease, box-shadow var(--motion-fast, 150ms) ease;
+}
+.trigger:hover {
+  box-shadow: var(--shadow-glow);
+}
+.trigger:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent));
+  outline-offset: 2px;
+}
+.triggerChevron {
+  margin-left: var(--space-1);
+}
+
+/* ── Panel ── */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-top: var(--space-3);
+  padding: var(--space-5);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+}
+
+.panelHeading {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+/* ── Findings checklist ── */
+
+.findings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.finding {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+.finding span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.iconOk {
+  color: var(--success);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.iconWarn {
+  color: var(--warning);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.iconInfo {
+  color: var(--info);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* ── AI diagnosis ── */
+
+.diagnosis {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+}
+.subHeading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.subHeading svg {
+  color: var(--accent);
+}
+.cause {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.loadingLine {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.diagnosisError {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--danger);
+}
+.spinner {
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── Suggestions ── */
+
+.suggestions {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.suggestion {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--accent-soft);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+.suggestion svg {
+  color: var(--accent);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.suggestionTarget {
+  font-weight: 600;
+  margin-right: var(--space-1);
+}
+
+/* ── Disclosure sections (SQL, rows, citations, sources, timeline) ── */
+
+.disclosure {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-surface);
+}
+.disclosureToggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 36px;
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-weight: 500;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.disclosureToggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-subtle);
+}
+.disclosureToggle svg {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.disclosureBody {
+  padding: var(--space-3);
+  border-top: 1px solid var(--border-default);
+}
+
+/* ── Processing timeline ── */
+
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.stage {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.stage:hover {
+  background: var(--bg-subtle);
+}
+.stageOk {
+  color: var(--success);
+  flex-shrink: 0;
+}
+.stageError {
+  color: var(--danger);
+  flex-shrink: 0;
+}
+.stageOp {
+  flex: 1;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stageDuration {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ── Citations & sources (shared with the old inline sections) ── */
+
+.citations {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.citation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+}
+.citationHead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.citationNum {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.citationTitle {
+  font-weight: 500;
+}
+.citationMeta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.citationIds {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.sources {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.source {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}

@@ -198,6 +198,9 @@ describe("CopilotPage", () => {
     const user = userEvent.setup();
     renderWithProviders(<CopilotPage />, { route: "/copilot" });
 
+    // The context panel is collapsed by default; open it to reach its controls.
+    await user.click(screen.getByRole("button", { name: /show context panel/i }));
+
     // The active document constraint is visible in the context rail.
     expect(
       screen.getByRole("button", { name: /remove document doc-123/i }),
@@ -228,6 +231,9 @@ describe("CopilotPage", () => {
 
     const user = userEvent.setup();
     renderWithProviders(<CopilotPage />, { route: "/copilot" });
+
+    // The context panel is collapsed by default; open it to reach its controls.
+    await user.click(screen.getByRole("button", { name: /show context panel/i }));
 
     await user.click(screen.getByRole("button", { name: /remove document doc-1/i }));
 
@@ -333,6 +339,8 @@ describe("CopilotPage", () => {
     await user.click(screen.getByRole("button", { name: /send question/i }));
     expect(await screen.findByText("First answer.")).toBeInTheDocument();
 
+    // The context panel is collapsed by default; open it to reach its controls.
+    await user.click(screen.getByRole("button", { name: /show context panel/i }));
     await user.click(screen.getByRole("button", { name: /forget context/i }));
 
     await waitFor(() => expect(forgetCalled).toBe(true));

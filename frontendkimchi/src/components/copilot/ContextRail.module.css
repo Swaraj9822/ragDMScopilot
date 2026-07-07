@@ -2,13 +2,15 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  /* Sit at the top of its grid track rather than stretching to full height. */
+  align-self: start;
 }
 
 .block {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius);
-  padding: var(--space-4);
+  padding: var(--space-5);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);

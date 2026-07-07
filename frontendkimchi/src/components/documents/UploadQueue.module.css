@@ -2,8 +2,8 @@
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius);
-  padding: var(--space-4);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  padding: var(--space-6);
+  box-shadow: var(--shadow-card);
 }
 .head {
   display: flex;

@@ -291,11 +291,14 @@ function makeSchema(): SchemaTable[] {
 }
 
 describe("SqlLabPage schema sidebar", () => {
-  it("renders each returned table and its columns (R7.5)", async () => {
+  it("renders each returned table and its columns when the Schema panel is expanded (R7.5)", async () => {
+    const user = userEvent.setup();
     listSchemaMock.mockResolvedValueOnce(makeSchema());
     renderWithProviders(<SqlLabPage />, { route: "/sql-lab" });
 
-    const sidebar = screen.getByRole("complementary", { name: /database schema/i });
+    const sidebar = screen.getByRole("complementary", { name: /sql lab tools/i });
+    // The Schema panel is collapsed by default; expand it by clicking its button.
+    await user.click(within(sidebar).getByRole("button", { name: /^schema$/i }));
 
     // Each returned table name is rendered.
     expect(await within(sidebar).findByText("orders")).toBeInTheDocument();
@@ -316,10 +319,12 @@ describe("SqlLabPage schema sidebar", () => {
   });
 
   it("shows the no-tables indication when zero tables are returned (R7.6)", async () => {
+    const user = userEvent.setup();
     listSchemaMock.mockResolvedValueOnce([]);
     renderWithProviders(<SqlLabPage />, { route: "/sql-lab" });
 
-    const sidebar = screen.getByRole("complementary", { name: /database schema/i });
+    const sidebar = screen.getByRole("complementary", { name: /sql lab tools/i });
+    await user.click(within(sidebar).getByRole("button", { name: /^schema$/i }));
 
     expect(
       await within(sidebar).findByText(/no tables are available/i),
@@ -329,12 +334,14 @@ describe("SqlLabPage schema sidebar", () => {
   });
 
   it("shows an error indication and does NOT render a table list when the request fails (R7.7)", async () => {
+    const user = userEvent.setup();
     listSchemaMock.mockRejectedValueOnce(
       new ApiError(500, "The schema listing could not be retrieved."),
     );
     renderWithProviders(<SqlLabPage />, { route: "/sql-lab" });
 
-    const sidebar = screen.getByRole("complementary", { name: /database schema/i });
+    const sidebar = screen.getByRole("complementary", { name: /sql lab tools/i });
+    await user.click(within(sidebar).getByRole("button", { name: /^schema$/i }));
 
     // The backend-supplied error detail is shown as the error indication.
     expect(

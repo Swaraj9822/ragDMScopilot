@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Clock, MousePointerClick, RefreshCw, SearchX } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  MousePointerClick,
+  RefreshCw,
+  SearchX,
+} from "lucide-react";
 import { getTrace, searchTraces } from "../api/observability";
 import { ApiError } from "../api/client";
 import type { Trace } from "../api/types";
@@ -28,6 +35,8 @@ import { useObservabilityPrefs } from "../hooks/useObservabilityPrefs";
 import styles from "./ObservabilityPage.module.css";
 
 const SUMMARY_CAP = 500;
+/** Number of traces shown per page in the trace list. */
+const PAGE_SIZE = 10;
 
 function filtersFromParams(params: URLSearchParams): TraceFilterState {
   return {
@@ -60,6 +69,8 @@ export default function ObservabilityPage() {
   const [filters, setFilters] = useState<TraceFilterState>(() =>
     filtersFromParams(searchParams),
   );
+  // Which page of the trace list is shown (10 traces per page).
+  const [page, setPage] = useState(0);
 
   const validation = validateTraceFilters(filters);
 
@@ -128,6 +139,22 @@ export default function ObservabilityPage() {
     () => Array.from(new Set((tracesQuery.data ?? []).map((t) => t.route))),
     [tracesQuery.data],
   );
+
+  // Paginate the visible traces to PAGE_SIZE per page. The current page is
+  // clamped so it stays valid when the underlying list shrinks (e.g. after a
+  // filter change or refresh).
+  const totalPages = Math.max(1, Math.ceil(visibleTraces.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages - 1);
+  const pagedTraces = visibleTraces.slice(
+    currentPage * PAGE_SIZE,
+    currentPage * PAGE_SIZE + PAGE_SIZE,
+  );
+
+  // Reset to the first page whenever the query window/filters or the console
+  // traffic toggle change, so a new result set starts from the top.
+  useEffect(() => {
+    setPage(0);
+  }, [queryDescriptor, prefs.hideConsoleTraffic]);
 
   // Deep-link trace fetch when the selected trace is not in the current window.
   const traceInWindow = selectedTraceId
@@ -279,11 +306,42 @@ export default function ObservabilityPage() {
                   }
                 />
               ) : (
-                <TraceList
-                  traces={visibleTraces}
-                  selectedId={selectedTraceId}
-                  onSelect={selectTrace}
-                />
+                <>
+                  <TraceList
+                    traces={pagedTraces}
+                    selectedId={selectedTraceId}
+                    onSelect={selectTrace}
+                  />
+                  {visibleTraces.length > PAGE_SIZE && (
+                    <div className={styles.pagination}>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => setPage((p) => Math.max(0, p - 1))}
+                        disabled={currentPage === 0}
+                        aria-label="Previous page"
+                      >
+                        <ChevronLeft size={16} aria-hidden="true" />
+                        Prev
+                      </button>
+                      <span className={styles.pageInfo} aria-live="polite">
+                        Page {currentPage + 1} of {totalPages}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() =>
+                          setPage((p) => Math.min(totalPages - 1, p + 1))
+                        }
+                        disabled={currentPage >= totalPages - 1}
+                        aria-label="Next page"
+                      >
+                        Next
+                        <ChevronRight size={16} aria-hidden="true" />
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
             </div>
 
