@@ -54,14 +54,27 @@ TRACES_DDL: tuple[str, ...] = (
         route         TEXT NOT NULL,
         start_ts      TIMESTAMPTZ NOT NULL,
         duration_ms   BIGINT NOT NULL CHECK (duration_ms >= 0),
-        root_status   TEXT NOT NULL CHECK (root_status IN ('success','error'))
+        root_status   TEXT NOT NULL CHECK (root_status IN ('success','error')),
+        ai_configuration_version_id TEXT,
+        resolved_settings           JSONB NOT NULL DEFAULT '{}'::jsonb
     )
     """,
+    # Migrations for ``traces`` tables created before the AI-configuration
+    # attribution columns existed (R9.1, R9.11). ``ADD COLUMN IF NOT EXISTS`` is
+    # idempotent, so these run safely on every startup alongside the CREATE
+    # TABLE above and bring an older table up to the current shape without a
+    # separate manual migration step.
+    "ALTER TABLE traces ADD COLUMN IF NOT EXISTS ai_configuration_version_id TEXT",
+    "ALTER TABLE traces ADD COLUMN IF NOT EXISTS resolved_settings JSONB NOT NULL DEFAULT '{}'::jsonb",
     "CREATE INDEX IF NOT EXISTS traces_start_ts_idx ON traces (start_ts DESC)",
     "CREATE INDEX IF NOT EXISTS traces_route_idx    ON traces (route)",
     "CREATE INDEX IF NOT EXISTS traces_status_idx   ON traces (root_status)",
 )
-"""DDL for the ``traces`` table and its ordering/filtering indexes."""
+"""DDL for the ``traces`` table and its ordering/filtering indexes.
+
+Includes the ``ai_configuration_version_id`` / ``resolved_settings`` columns
+(R9.1, R9.11) both in the ``CREATE TABLE`` (new deployments) and as idempotent
+``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` migrations (existing deployments)."""
 
 SPANS_DDL: tuple[str, ...] = (
     """

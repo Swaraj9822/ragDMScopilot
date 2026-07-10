@@ -84,13 +84,24 @@ _MAX_LIMIT = 1000
 # ---------------------------------------------------------------------------
 
 INSERT_TRACE_SQL = """
-    INSERT INTO traces (trace_id, route, start_ts, duration_ms, root_status)
-    VALUES (%s, %s, %s::timestamptz, %s, %s)
+    INSERT INTO traces (
+        trace_id, route, start_ts, duration_ms, root_status,
+        ai_configuration_version_id, resolved_settings
+    )
+    VALUES (%s, %s, %s::timestamptz, %s, %s, %s, %s::jsonb)
     ON CONFLICT (trace_id) DO UPDATE SET
         route = EXCLUDED.route,
         start_ts = EXCLUDED.start_ts,
         duration_ms = EXCLUDED.duration_ms,
-        root_status = EXCLUDED.root_status
+        root_status = EXCLUDED.root_status,
+        ai_configuration_version_id = COALESCE(
+            EXCLUDED.ai_configuration_version_id, traces.ai_configuration_version_id
+        ),
+        resolved_settings = CASE
+            WHEN EXCLUDED.ai_configuration_version_id IS NOT NULL
+                THEN EXCLUDED.resolved_settings
+            ELSE traces.resolved_settings
+        END
 """
 """Upsert a single ``traces`` row (R5.2).
 
@@ -99,7 +110,13 @@ closes its child spans well before its root). Each cycle persists the spans seen
 so far grouped under the same ``trace_id``; ``ON CONFLICT DO UPDATE`` lets the
 trace-level fields converge to the values carried by the batch that contains the
 Root_Span (correct route, full duration, final status) instead of failing the
-second write and discarding the rest of the trace."""
+second write and discarding the rest of the trace.
+
+The AI-configuration attribution (``ai_configuration_version_id`` /
+``resolved_settings``, R9.1/R9.11) is stamped only on the Root_Span, so only the
+batch containing it carries a non-null version. ``COALESCE`` / the ``CASE`` guard
+therefore preserve an already-persisted attribution: a later non-root flush
+batch (which carries a null version) never overwrites it back to null."""
 
 INSERT_SPAN_SQL = """
     INSERT INTO spans (
@@ -120,7 +137,13 @@ across multiple flush cycles."""
 # ---------------------------------------------------------------------------
 
 #: Trace-row columns selected by the read queries, in :meth:`_row_to_trace` order.
-_TRACE_COLUMNS = "trace_id, route, start_ts, duration_ms, root_status"
+#: Matches the ``INSERT_TRACE_SQL`` column order so a stored row round-trips
+#: through ``_write_atomically`` → ``_row_to_trace`` unchanged, including the
+#: AI-configuration attribution columns (R9.1, R9.11).
+_TRACE_COLUMNS = (
+    "trace_id, route, start_ts, duration_ms, root_status, "
+    "ai_configuration_version_id, resolved_settings"
+)
 
 #: Span-row columns selected by the read queries, in :meth:`_row_to_span` order.
 _SPAN_COLUMNS = "span_id, parent_span_id, operation, start_ts, duration_ms, status, attributes"
@@ -297,6 +320,12 @@ class PostgresTraceStore:
                         stored["start_ts"],
                         stored["duration_ms"],
                         stored["root_status"],
+                        # Optional in StoredTrace (NotRequired): absent when the
+                        # AI configuration was unresolved (R9.2). None is stored
+                        # as SQL NULL; resolved_settings defaults to an empty
+                        # JSON object so the column is never NULL.
+                        stored.get("ai_configuration_version_id"),
+                        json.dumps(stored.get("resolved_settings") or {}),
                     ),
                 )
                 for span in stored["spans"]:
@@ -438,9 +467,20 @@ class PostgresTraceStore:
         """Rebuild a :class:`Trace` from a ``traces`` row (``_TRACE_COLUMNS`` order).
 
         ``start_ts`` comes back as a timezone-aware ``datetime`` (or an ISO-8601
-        string via a fake connection in tests) and is normalised to UTC.
+        string via a fake connection in tests) and is normalised to UTC. The
+        AI-configuration columns (R9.1, R9.11) round-trip too:
+        ``ai_configuration_version_id`` is ``None`` when the configuration was
+        unresolved, and ``resolved_settings`` (JSONB) is coerced back to a dict.
         """
-        trace_id, route, start_ts, duration_ms, root_status = row
+        (
+            trace_id,
+            route,
+            start_ts,
+            duration_ms,
+            root_status,
+            ai_configuration_version_id,
+            resolved_settings,
+        ) = row
         return Trace(
             trace_id=trace_id,
             route=route,
@@ -448,6 +488,8 @@ class PostgresTraceStore:
             duration_ms=int(duration_ms),
             root_status=root_status,
             spans=spans,
+            ai_configuration_version_id=ai_configuration_version_id,
+            resolved_settings=_coerce_attributes(resolved_settings),
         )
 
     @staticmethod

@@ -7,6 +7,8 @@ exists); ``/auth/me`` is protected and echoes the authenticated user. Mount with
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 
 from rag_system.auth.dependencies import (
@@ -84,27 +86,81 @@ def _access_body(pair: TokenResponse) -> AccessTokenResponse:
         expires_in=pair.expires_in,
     )
 
-# Shared per-process limiter for credential-bearing endpoints. A per-minute
-# allowance of 0 disables throttling. The limiter is resolved lazily on the
-# first request (not at import) so importing this module never reads settings —
-# keeping app/test collection independent of the runtime configuration.
-_auth_limiter: SlidingWindowRateLimiter | None = None
-_auth_limiter_ready = False
+
+def _origin_from_referer(referer: str | None) -> str | None:
+    """Derive a ``scheme://host[:port]`` origin from a Referer header, or None."""
+    if not referer:
+        return None
+    parts = urlsplit(referer)
+    if parts.scheme and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}"
+    return None
+
+
+def verify_trusted_origin(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Reject cross-site (CSRF) requests to cookie-authenticated auth endpoints.
+
+    The refresh token rides in an httpOnly cookie the browser attaches
+    automatically, so ``/auth/refresh`` and ``/auth/logout`` are reachable by a
+    cross-site forgery. This guard enforces the standard Origin/Referer check:
+
+    * When the browser supplies an ``Origin`` header (always present on a
+      cross-site ``POST``) — or, failing that, a ``Referer`` — it must match a
+      trusted origin: one of the configured CORS origins, or the request's own
+      host (same-origin). A mismatch is refused with ``403``.
+    * A request with neither header (e.g. a non-browser client that sends the
+      refresh token in the JSON body rather than the cookie) is allowed: the
+      cookie-CSRF vector requires a browser, and browsers always send ``Origin``
+      on a cross-site state-changing request.
+
+    Host comparison for the same-origin case uses ``netloc`` (host:port) only, so
+    it still holds behind a TLS-terminating proxy that presents a different
+    scheme to the app.
+    """
+    origin = request.headers.get("origin") or _origin_from_referer(
+        request.headers.get("referer")
+    )
+    if origin is None:
+        return
+
+    normalized = origin.rstrip("/").lower()
+    allowed = {o.rstrip("/").lower() for o in settings.cors_allow_origins_list}
+    if normalized in allowed:
+        return
+
+    origin_netloc = urlsplit(origin).netloc.lower()
+    if origin_netloc and origin_netloc == request.url.netloc.lower():
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="cross-origin request rejected",
+    )
+
+# Shared per-process limiters for credential-bearing endpoints, keyed by the
+# configured per-minute allowance. A per-minute allowance of 0 disables
+# throttling (cached as None). Keying by the rate means a settings reload that
+# changes the allowance rebuilds the limiter instead of serving a stale one; the
+# limiter is still resolved lazily on first request (not at import) so importing
+# this module never reads settings.
+_auth_limiters: dict[int, SlidingWindowRateLimiter | None] = {}
 
 
 def _get_auth_limiter() -> SlidingWindowRateLimiter | None:
-    """Build (once) and return the shared auth limiter from settings.
+    """Build (once per distinct rate) and return the shared auth limiter.
 
     Returns ``None`` when throttling is disabled (per-minute allowance 0).
+    Rebuilds automatically if the configured allowance changes.
     """
-    global _auth_limiter, _auth_limiter_ready
-    if not _auth_limiter_ready:
-        rpm = get_settings().auth_rate_limit_per_minute
-        _auth_limiter = (
+    rpm = get_settings().auth_rate_limit_per_minute
+    if rpm not in _auth_limiters:
+        _auth_limiters[rpm] = (
             SlidingWindowRateLimiter(limit=rpm, window_seconds=60.0) if rpm > 0 else None
         )
-        _auth_limiter_ready = True
-    return _auth_limiter
+    return _auth_limiters[rpm]
 
 
 def _auth_rate_limit(scope: str):
@@ -188,7 +244,7 @@ def login(
 @router.post(
     "/refresh",
     response_model=AccessTokenResponse,
-    dependencies=_auth_rate_limit("refresh"),
+    dependencies=[*_auth_rate_limit("refresh"), Depends(verify_trusted_origin)],
 )
 def refresh(
     response: Response,
@@ -233,6 +289,7 @@ def refresh(
     "/logout",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
+    dependencies=[Depends(verify_trusted_origin)],
 )
 def logout(
     response: Response,

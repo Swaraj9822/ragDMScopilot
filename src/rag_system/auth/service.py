@@ -8,6 +8,7 @@ raises domain errors that those map to responses.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
 from rag_system.auth import tokens
 from rag_system.auth.models import TokenResponse, UserRecord
@@ -91,7 +92,7 @@ class AuthService:
         (mitigates user-enumeration via timing).
         """
         user = self._store.get_by_email(email)
-        stored_hash = user.password_hash if user else _DUMMY_HASH
+        stored_hash = user.password_hash if user else _dummy_hash()
         password_ok = verify_password(password, stored_hash)
         if user is None or not password_ok:
             raise InvalidCredentialsError("Incorrect email or password.")
@@ -188,4 +189,9 @@ class AuthService:
 
 # A precomputed bcrypt hash of a random value, used as a constant-work stand-in
 # when the email is unknown so authenticate() spends the same effort either way.
-_DUMMY_HASH = hash_password("dummy-password-for-constant-time-comparison")
+# Computed lazily (and cached) on first use rather than at import: a bcrypt hash
+# costs ~50-100ms, which should not be paid on every process/test-collection
+# import of this module.
+@lru_cache(maxsize=1)
+def _dummy_hash() -> str:
+    return hash_password("dummy-password-for-constant-time-comparison")

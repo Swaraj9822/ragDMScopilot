@@ -24,7 +24,7 @@ Coverage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -50,6 +50,11 @@ class _TraceRow:
     start_ts: datetime
     duration_ms: int
     root_status: str
+    # AI-configuration attribution columns (R9.1, R9.11); default to the
+    # "unresolved" shape so existing call sites that don't care about them are
+    # unaffected.
+    ai_configuration_version_id: str | None = None
+    resolved_settings: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -79,9 +84,17 @@ class _FakeDB:
         start_ts: datetime,
         duration_ms: int = 10,
         root_status: str = "success",
+        ai_configuration_version_id: str | None = None,
+        resolved_settings: dict[str, Any] | None = None,
     ) -> None:
         self.traces[trace_id] = _TraceRow(
-            trace_id, route, start_ts, duration_ms, root_status
+            trace_id,
+            route,
+            start_ts,
+            duration_ms,
+            root_status,
+            ai_configuration_version_id,
+            resolved_settings or {},
         )
         self.spans.setdefault(trace_id, [])
 
@@ -190,7 +203,15 @@ class _FakeCursor:
 
     @staticmethod
     def _trace_tuple(row: _TraceRow) -> tuple[Any, ...]:
-        return (row.trace_id, row.route, row.start_ts, row.duration_ms, row.root_status)
+        return (
+            row.trace_id,
+            row.route,
+            row.start_ts,
+            row.duration_ms,
+            row.root_status,
+            row.ai_configuration_version_id,
+            row.resolved_settings,
+        )
 
     def fetchone(self) -> tuple[Any, ...] | None:
         return self._result[0] if self._result else None

@@ -28,7 +28,9 @@ from rag_system.auth import apply_schema as apply_auth_schema
 from rag_system.auth import get_current_user
 from rag_system.auth import require_operator
 from rag_system.auth import router as auth_router
+from rag_system.auth.dependencies import resolve_is_operator
 from rag_system.auth.models import UserPublic
+from rag_system.auth.tokens import TokenError, decode_token
 from rag_system.config import Settings, get_settings
 from rag_system.conversation import ConversationManager
 from rag_system.copilot import DatabaseCopilotService, SqlValidationError
@@ -131,14 +133,16 @@ async def lifespan(app: FastAPI):
             )
 
         # The /metrics scrape endpoint is only token-gated when RAG_METRICS_TOKEN
-        # is set; otherwise it stays open (backward compatible). With auth on,
-        # an open metrics endpoint is almost certainly unintended, so surface it
-        # at boot as a conscious choice rather than a forgotten default.
+        # is set. Without it, /metrics now requires a valid user token (closed by
+        # default) rather than being public — but a scraper can't present a user
+        # JWT, so surface the missing dedicated token at boot as a conscious
+        # choice.
         if not settings.metrics_token:
             logger.warning(
-                "RAG_METRICS_TOKEN is unset while auth is enabled: the /metrics "
-                "endpoint is publicly reachable. Set RAG_METRICS_TOKEN or block "
-                "/metrics at the reverse proxy."
+                "RAG_METRICS_TOKEN is unset while auth is enabled: /metrics now "
+                "requires a valid user token (closed by default). Set "
+                "RAG_METRICS_TOKEN so your Prometheus scrape job can authenticate, "
+                "or block /metrics at the reverse proxy."
             )
 
         # Prune expired refresh tokens periodically so the table does not grow
@@ -167,6 +171,15 @@ async def lifespan(app: FastAPI):
         )
 
     yield
+
+    # -- Shutdown: drain background workers so buffered spans/logs and pending
+    # off-path query-trace writes are flushed rather than lost on a graceful
+    # stop. All are daemon threads, so an ungraceful kill still won't hang. --
+    if settings.tracing_enabled:
+        _shutdown_observability_platform()
+    from rag_system.service import shutdown_trace_persist_executor
+
+    shutdown_trace_persist_executor()
 
 
 app = FastAPI(title="Production RAG", version="0.1.0", lifespan=lifespan)
@@ -211,8 +224,19 @@ def get_conversations() -> ConversationManager:
     return ConversationManager(store=get_service().artifact_store, settings=get_settings())
 
 
-@lru_cache
-def get_router() -> AgenticRouter:
+#: Router singleton + availability flag + last-check timestamp. Not
+#: ``@lru_cache``d, because a router built while the copilot was unavailable
+#: would otherwise stay RAG-only for the whole process lifetime — even after the
+#: copilot's schema catalog / DB config recovered. See :func:`get_router`.
+_router_state: dict[str, object] = {"router": None, "available": False, "checked_at": 0.0}
+
+#: How long to wait before re-attempting to (re)acquire an unavailable copilot.
+#: Only applies while degraded; once the copilot is available the router is
+#: reused indefinitely with no further checks.
+_ROUTER_RECHECK_SECONDS = 300.0
+
+
+def _build_router() -> AgenticRouter:
     settings = get_settings()
     rag = get_service()
     try:
@@ -230,6 +254,30 @@ def get_router() -> AgenticRouter:
     return AgenticRouter(settings, rag, copilot, conversations=get_conversations())
 
 
+def get_router() -> AgenticRouter:
+    """Return the shared AgenticRouter, rebuilding to recover a degraded copilot.
+
+    Once a router with an available copilot is built it is reused indefinitely.
+    While the copilot is unavailable the router still serves RAG-only, but it is
+    rebuilt at most once every ``_ROUTER_RECHECK_SECONDS`` so a copilot that
+    recovers (e.g. the schema catalog is added, or DB config is fixed) is picked
+    up without a process restart — the previous behaviour under ``@lru_cache``.
+    """
+    router = _router_state["router"]
+    if router is not None and _router_state["available"]:
+        return router
+
+    now = time.monotonic()
+    if router is not None and (now - float(_router_state["checked_at"])) < _ROUTER_RECHECK_SECONDS:
+        return router  # recently checked, still degraded — avoid rebuild churn
+
+    router = _build_router()
+    _router_state["router"] = router
+    _router_state["available"] = bool(getattr(router, "copilot_available", False))
+    _router_state["checked_at"] = now
+    return router
+
+
 @lru_cache
 def get_trace_store() -> PostgresTraceStore:
     return PostgresTraceStore(get_settings())
@@ -245,6 +293,11 @@ def get_log_store() -> PostgresLogStore:
 # ---------------------------------------------------------------------------
 
 _observability_started = False
+
+#: References to the started observability background workers, held so the
+#: lifespan can drain them on shutdown. Populated by
+#: :func:`_start_observability_platform`.
+_observability_components: dict[str, object] = {}
 
 #: Idempotency guard + reference holder for the refresh-token cleanup daemon.
 _refresh_cleanup_started = False
@@ -362,7 +415,37 @@ def _start_observability_platform() -> None:
     )
     retention.start()
 
+    # Hold references so the lifespan can drain them on shutdown (otherwise
+    # spans/logs still buffered at exit are lost). They remain daemon threads,
+    # so an ungraceful kill still never hangs the process.
+    _observability_components["trace_flush"] = trace_flush
+    _observability_components["log_flush"] = log_flush
+    _observability_components["retention"] = retention
+
     logger.info("Observability platform started (flush workers + retention scheduler)")
+
+
+def _shutdown_observability_platform() -> None:
+    """Drain and stop the observability background workers on shutdown.
+
+    Flush workers are stopped with ``drain=True`` so spans/logs still buffered
+    at exit are written rather than dropped; the retention scheduler is stopped
+    without a final sweep. Best-effort and bounded by a short timeout — a slow
+    store must not hang process shutdown.
+    """
+    for name in ("trace_flush", "log_flush"):
+        worker = _observability_components.pop(name, None)
+        if worker is not None:
+            try:
+                worker.stop(timeout=5.0, drain=True)
+            except Exception:  # noqa: BLE001 - shutdown must not raise
+                logger.warning("Failed to drain %s on shutdown", name, exc_info=True)
+    retention = _observability_components.pop("retention", None)
+    if retention is not None:
+        try:
+            retention.stop(timeout=5.0)
+        except Exception:  # noqa: BLE001 - shutdown must not raise
+            logger.warning("Failed to stop retention scheduler on shutdown", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -394,25 +477,55 @@ def _resolve_inbound_trace_id(header_value: str | None) -> str:
 
 
 def verify_metrics_access(request: Request) -> None:
-    """Gate ``/metrics`` behind a dedicated bearer token when one is configured.
+    """Gate ``/metrics`` so it is never publicly readable when auth is enabled.
 
-    Prometheus scrapers don't carry user JWTs, so when ``RAG_METRICS_TOKEN`` is
-    set the scrape job authenticates with that token instead. When it is unset
-    the endpoint stays open (backward compatible); set it in production, or block
-    ``/metrics`` at the reverse proxy, so route latencies and model ids are not
-    publicly readable.
+    Prometheus scrapers don't carry user JWTs, so the preferred setup is a
+    dedicated ``RAG_METRICS_TOKEN`` the scrape job sends as a bearer token. The
+    access rules are:
+
+    * ``RAG_METRICS_TOKEN`` set → require exactly that bearer token (the scraper
+      path), regardless of auth mode.
+    * token unset, auth enabled → require a valid **user** bearer token, so the
+      endpoint is closed by default rather than leaking route latencies, error
+      rates, and model ids to anonymous callers.
+    * token unset, auth disabled → open (trusted single-user/local deployment).
+
+    Set ``RAG_METRICS_TOKEN`` in production, or block ``/metrics`` at the reverse
+    proxy and keep only ``/health`` open.
     """
-    token = get_settings().metrics_token
-    if not token:
+    settings = get_settings()
+    token = settings.metrics_token
+    if token:
+        provided = request.headers.get("Authorization", "")
+        expected = f"Bearer {token}"
+        if not secrets.compare_digest(provided, expected):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Valid metrics token required.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         return
-    provided = request.headers.get("Authorization", "")
-    expected = f"Bearer {token}"
-    if not secrets.compare_digest(provided, expected):
+
+    if not settings.auth_enabled:
+        return
+
+    # Auth enabled but no dedicated metrics token: require a valid user token so
+    # the endpoint is not publicly reachable.
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Valid metrics token required.",
+            detail="Authentication required for metrics.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    try:
+        decode_token(settings, authorization[len("Bearer ") :])
+    except TokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Valid authentication required for metrics.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
 
 #: Result-limit bounds for trace search (R8.7).
 _MIN_TRACE_LIMIT = 1
@@ -626,15 +739,58 @@ def metrics_endpoint() -> PlainTextResponse:
     )
 
 
+def _user_can_access_document(
+    record: DocumentRecord, user: UserPublic, settings: Settings
+) -> bool:
+    """Whether *user* may read or mutate *record* under role-based scoping (R4.11).
+
+    Operators — and the anonymous user when auth is disabled — may access every
+    document. A non-operator may access only documents they own. Legacy records
+    with no ``owner`` are inaccessible to non-operators, matching the corpus
+    listing's scoping so the two views stay consistent.
+    """
+    if not settings.auth_enabled:
+        return True
+    if resolve_is_operator(user, settings):
+        return True
+    return record.owner is not None and record.owner == user.email
+
+
+def _scoped_document_ids(
+    requested: list[str] | None, user: UserPublic, settings: Settings
+) -> list[str] | None:
+    """Restrict a query's document scope to what the caller may retrieve (R4.11).
+
+    Operators (and the anonymous user when auth is disabled) are unrestricted:
+    the requested scope — possibly ``None`` meaning the whole corpus — is
+    returned unchanged. A non-operator is confined to the documents they own: the
+    intersection of the requested ids with their owned set, or all their owned
+    ids when none were requested. An empty list is returned when they own nothing
+    in scope; :meth:`PineconeHybridIndex.search` treats that as "match no
+    documents", so retrieval never falls through to an unscoped whole-index
+    search that would leak another user's content.
+    """
+    if not settings.auth_enabled or resolve_is_operator(user, settings):
+        return requested
+    owned = {
+        doc.id
+        for doc in get_service().list_documents()
+        if doc.owner is not None and doc.owner == user.email
+    }
+    if requested:
+        return [doc_id for doc_id in requested if doc_id in owned]
+    return sorted(owned)
+
+
 @app.post(
     "/documents",
     response_model=DocumentRecord,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(get_current_user)],
 )
 async def upload_document(
     request: Request,
     file: UploadFile = File(...),
+    user: UserPublic = Depends(get_current_user),
 ) -> DocumentRecord:
     content = await _read_document_upload(request, file)
 
@@ -646,26 +802,41 @@ async def upload_document(
     )
 
     service = get_service()
-    return await service.queue_pdf(file.filename or "document", content)
+    # Stamp the uploader as the owner so role-based corpus scoping works (R4.11).
+    return await service.queue_pdf(file.filename or "document", content, owner=user.email)
 
 
 @app.put(
     "/documents/{document_id}",
     response_model=DocumentRecord,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(get_current_user)],
 )
 async def update_document(
     document_id: str,
     request: Request,
     file: UploadFile = File(...),
+    user: UserPublic = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
 ) -> DocumentRecord:
     content = await _read_document_upload(request, file)
 
-    record = await get_service().update_document(
+    service = get_service()
+    # Authorize before mutating: a non-operator may only replace a document they
+    # own. A missing or unauthorized document both return 404 so existence is
+    # not disclosed to a non-owner.
+    existing = await asyncio.to_thread(service.get_document, document_id)
+    if (
+        existing is None
+        or existing.status == DocumentStatus.deleted
+        or not _user_can_access_document(existing, user, settings)
+    ):
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    record = await service.update_document(
         document_id,
         file.filename or "document",
         content,
+        owner=user.email,
     )
     if not record:
         raise HTTPException(status_code=404, detail="Document not found.")
@@ -675,10 +846,17 @@ async def update_document(
 @app.delete(
     "/documents/{document_id}",
     response_model=DocumentRecord,
-    dependencies=[Depends(get_current_user)],
 )
-def delete_document(document_id: str) -> DocumentRecord:
-    record = get_service().delete_document(document_id)
+def delete_document(
+    document_id: str,
+    user: UserPublic = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> DocumentRecord:
+    service = get_service()
+    existing = service.get_document(document_id)
+    if existing is None or not _user_can_access_document(existing, user, settings):
+        raise HTTPException(status_code=404, detail="Document not found.")
+    record = service.delete_document(document_id)
     if not record:
         raise HTTPException(status_code=404, detail="Document not found.")
     return record
@@ -707,25 +885,39 @@ async def _read_document_upload(request: Request, file: UploadFile) -> bytes:
                 detail=f"Uploaded file is too large. Maximum size is {max_upload_bytes} bytes.",
             )
 
-    content = await file.read()
+    # Read the body in bounded chunks and stop as soon as the limit is exceeded,
+    # so a client that omits or understates Content-Length (e.g. a chunked
+    # transfer) cannot force the whole oversized upload to be buffered before the
+    # size is checked. We read one chunk past the limit only to detect overflow.
+    chunk_size = 1024 * 1024
+    buffer = bytearray()
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        buffer.extend(chunk)
+        if len(buffer) > max_upload_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Uploaded file is too large. Maximum size is {max_upload_bytes} bytes.",
+            )
+    content = bytes(buffer)
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-    if len(content) > max_upload_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Uploaded file is too large. Maximum size is {max_upload_bytes} bytes.",
-        )
     return content
 
 
 @app.get(
     "/documents/{document_id}",
     response_model=DocumentRecord,
-    dependencies=[Depends(get_current_user)],
 )
-def get_document(document_id: str) -> DocumentRecord:
+def get_document(
+    document_id: str,
+    user: UserPublic = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> DocumentRecord:
     record = get_service().get_document(document_id)
-    if not record:
+    if not record or not _user_can_access_document(record, user, settings):
         raise HTTPException(status_code=404, detail="Document not found.")
     return record
 
@@ -733,24 +925,46 @@ def get_document(document_id: str) -> DocumentRecord:
 @app.get(
     "/documents",
     response_model=list[DocumentRecord],
-    dependencies=[Depends(get_current_user)],
 )
-def list_documents() -> list[DocumentRecord]:
-    """List all uploaded documents."""
-    return get_service().list_documents()
+def list_documents(
+    user: UserPublic = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> list[DocumentRecord]:
+    """List uploaded documents visible to the caller.
+
+    Operators (and the anonymous user when auth is disabled) see the whole
+    corpus; a non-operator sees only the documents they own (R4.11), consistent
+    with ``GET /corpus``.
+    """
+    records = get_service().list_documents()
+    if not settings.auth_enabled or resolve_is_operator(user, settings):
+        return records
+    return [r for r in records if r.owner is not None and r.owner == user.email]
 
 
 @app.get(
     "/documents/{document_id}/versions",
     response_model=DocumentHistory,
-    dependencies=[Depends(get_current_user)],
 )
-def get_document_versions(document_id: str) -> DocumentHistory:
+def get_document_versions(
+    document_id: str,
+    user: UserPublic = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> DocumentHistory:
     """Return a Document's version history and ingestion events (R5.7).
 
     Versions and events are ordered by ingestion timestamp, most recent first.
+    Non-operators may only view the history of a document they own; an
+    unauthorized or unknown document both return 404.
     """
-    history = get_service().get_document_history(document_id)
+    service = get_service()
+    # Owner-scoping applies only to non-operators; operators (and the anonymous
+    # user when auth is disabled) skip the extra ownership pre-fetch entirely.
+    if settings.auth_enabled and not resolve_is_operator(user, settings):
+        record = service.get_document(document_id)
+        if record is None or not _user_can_access_document(record, user, settings):
+            raise HTTPException(status_code=404, detail="Document not found.")
+    history = service.get_document_history(document_id)
     if history is None:
         raise HTTPException(status_code=404, detail="Document not found.")
     return history
@@ -777,11 +991,12 @@ def restore_document_version(document_id: str, version: str) -> DocumentRecord:
     return record
 
 
-@app.post(
-    "/ask",
-    dependencies=[Depends(get_current_user)],
-)
-def ask(request: UnifiedQueryRequest) -> UnifiedQueryResponse | ClarificationPrompt | AbstentionResponse:
+@app.post("/ask")
+def ask(
+    request: UnifiedQueryRequest,
+    user: UserPublic = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> UnifiedQueryResponse | ClarificationPrompt | AbstentionResponse:
     """Unified endpoint — auto-routes to RAG, database copilot, or both.
 
     The answer path: classify → clarification gate → retrieval gates →
@@ -796,6 +1011,12 @@ def ask(request: UnifiedQueryRequest) -> UnifiedQueryResponse | ClarificationPro
         "Unified query received (%d chars)",
         len(request.question),
         extra={"query_len": len(request.question)},
+    )
+    # Confine RAG retrieval to documents the caller may read (R4.11). The
+    # database-copilot branch is unaffected — it queries the business DB, not the
+    # document corpus.
+    request = request.model_copy(
+        update={"document_ids": _scoped_document_ids(request.document_ids, user, settings)}
     )
     try:
         result = get_router().query(request)
@@ -815,8 +1036,13 @@ def _format_sse(event: dict) -> str:
     return f"event: {event['type']}\ndata: {payload}\n\n"
 
 
-@app.post(_ASK_STREAM_PATH, dependencies=[Depends(get_current_user)])
-async def ask_stream(request: UnifiedQueryRequest, http_request: Request) -> StreamingResponse:
+@app.post(_ASK_STREAM_PATH)
+async def ask_stream(
+    request: UnifiedQueryRequest,
+    http_request: Request,
+    user: UserPublic = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
     """Streaming variant of /ask — holds answer content until gates pass.
 
     Emits Server-Sent Events for stage progress (``classify``, ``retrieve``,
@@ -842,6 +1068,11 @@ async def ask_stream(request: UnifiedQueryRequest, http_request: Request) -> Str
         "Unified streaming query received (%d chars)",
         len(request.question),
         extra={"query_len": len(request.question)},
+    )
+    # Confine RAG retrieval to documents the caller may read (R4.11) before the
+    # producer thread runs the routing pipeline.
+    request = request.model_copy(
+        update={"document_ids": _scoped_document_ids(request.document_ids, user, settings)}
     )
     # Adopt the caller's trace id (the console always sends one) so the trace is
     # clickable from the answer; regenerate when it is missing or malformed so a
@@ -999,13 +1230,20 @@ def _get_clarification_store(router: AgenticRouter) -> ClarificationStore:
 @app.post(
     "/query",
     response_model=QueryResponse,
-    dependencies=[Depends(get_current_user)],
 )
-def query(request: QueryRequest) -> QueryResponse:
+def query(
+    request: QueryRequest,
+    user: UserPublic = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> QueryResponse:
     logger.info(
         "Query received (%d chars)",
         len(request.question),
         extra={"query_len": len(request.question)},
+    )
+    # Confine retrieval to documents the caller may read (R4.11).
+    request = request.model_copy(
+        update={"document_ids": _scoped_document_ids(request.document_ids, user, settings)}
     )
     return get_service().query(request)
 
@@ -1258,11 +1496,15 @@ def _get_replay_service():
 
 
 def _get_artifact_store():
-    """Return the shared GcsArtifactStore."""
-    from rag_system.storage import GcsArtifactStore
+    """Return the shared GcsArtifactStore.
 
-    settings = get_settings()
-    return GcsArtifactStore(settings)
+    Reuses the cached ``RagService`` singleton's store (built once via
+    ``get_service()``) instead of constructing a fresh ``GcsArtifactStore`` — and
+    a fresh GCS client — on every call. This matters on the answer hot path:
+    ``_stamp_trace_config`` runs per ``/ask`` and ``/query`` request, so a
+    per-request client was pure overhead.
+    """
+    return get_service().artifact_store
 
 
 @app.post(

@@ -16,9 +16,14 @@ from rag_system.service import DocumentDeletedError, RagService, StaleIngestionE
 
 logger = get_logger(__name__)
 
-#: Seconds to wait after a failed poll cycle before retrying, so a transient
-#: queue/network error backs off instead of spinning in a tight loop.
+#: Base seconds to wait after a failed poll cycle before retrying, so a transient
+#: queue/network error backs off instead of spinning in a tight loop. Consecutive
+#: failures back off exponentially up to ``ERROR_BACKOFF_MAX_SECONDS``.
 ERROR_BACKOFF_SECONDS = 5.0
+
+#: Ceiling for the exponential backoff so a prolonged outage settles at a steady
+#: retry cadence instead of hammering a down dependency every few seconds.
+ERROR_BACKOFF_MAX_SECONDS = 60.0
 
 #: Seconds to pause when a poll returned no messages, guarding against a hot
 #: loop if the queue is configured with a short/zero long-poll wait.
@@ -66,6 +71,7 @@ class IngestionWorker:
 
     async def run_forever(self) -> None:
         logger.info("Ingestion worker started")
+        backoff = ERROR_BACKOFF_SECONDS
         while True:
             try:
                 processed = await self.process_once()
@@ -73,11 +79,17 @@ class IngestionWorker:
                 # A poll/receive failure must never kill the worker loop — log it
                 # and back off, then keep polling. Previously an exception here
                 # propagated out of run_forever and silently stopped ingestion.
+                # Consecutive failures back off exponentially (capped) so a
+                # prolonged queue/network outage is not retried every few seconds.
                 logger.exception(
-                    "Ingestion poll cycle failed; backing off before retry"
+                    "Ingestion poll cycle failed; backing off %.0fs before retry",
+                    backoff,
                 )
-                await asyncio.sleep(ERROR_BACKOFF_SECONDS)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, ERROR_BACKOFF_MAX_SECONDS)
                 continue
+            # A clean cycle resets the backoff to the base delay.
+            backoff = ERROR_BACKOFF_SECONDS
             if processed == 0:
                 await asyncio.sleep(IDLE_SLEEP_SECONDS)
 

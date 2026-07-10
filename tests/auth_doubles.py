@@ -233,6 +233,9 @@ class _FakeCursor:
             self._result = self._db.find_user_by_email(params[0])
         elif "FROM users WHERE id" in s:
             self._result = self._db.find_user_by_id(params[0])
+        elif "UPDATE users SET password_hash" in s:
+            # params = (password_hash, email); RETURNING row or None.
+            self._result = self._db.set_user_password(params[0], params[1])
         elif "SELECT 1 FROM users" in s:
             self._result = (1,) if self._db.users else None
         elif "INSERT INTO refresh_tokens" in s:
@@ -312,6 +315,15 @@ class FakeAuthDB:
 
     def find_user_by_id(self, user_id: str):
         return self.users.get(user_id)
+
+    def set_user_password(self, password_hash: str, email: str):
+        """Update the matching user's password_hash; return the row or None."""
+        for user_id, row in self.users.items():
+            if row[1].strip().lower() == email.strip().lower():
+                updated = (row[0], row[1], password_hash, row[3], row[4], row[5])
+                self.users[user_id] = updated
+                return updated
+        return None
 
     def find_refresh_by_hash(self, token_hash: str):
         for row in self.refresh.values():

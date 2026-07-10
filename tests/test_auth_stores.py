@@ -209,3 +209,22 @@ def test_refresh_delete_expired_removes_only_past_expiry():
     # Running again with nothing expired removes nothing.
     assert store.delete_expired() == 0
 
+
+
+def test_set_password_updates_hash_and_returns_record():
+    store, _ = _user_store()
+    created = store.create_user("reset@example.com", "old-hash")
+
+    updated = store.set_password("Reset@Example.com", "new-hash")  # case-insensitive
+    assert updated is not None
+    assert updated.id == created.id
+    assert updated.password_hash == "new-hash"
+
+    # The change is persisted (read back through a fresh lookup).
+    fetched = store.get_by_email("reset@example.com")
+    assert fetched is not None and fetched.password_hash == "new-hash"
+
+
+def test_set_password_returns_none_for_unknown_email():
+    store, _ = _user_store()
+    assert store.set_password("nobody@example.com", "h") is None

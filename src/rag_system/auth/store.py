@@ -39,6 +39,12 @@ _SELECT_BY_EMAIL_SQL = f"SELECT {_COLUMNS} FROM users WHERE lower(email) = lower
 
 _SELECT_BY_ID_SQL = f"SELECT {_COLUMNS} FROM users WHERE id = %s"
 
+_UPDATE_PASSWORD_SQL = f"""
+    UPDATE users SET password_hash = %s
+    WHERE lower(email) = lower(%s)
+    RETURNING {_COLUMNS}
+"""
+
 _SELECT_ANY_USER_SQL = "SELECT 1 FROM users LIMIT 1"
 
 # Arbitrary constant key for the transaction-scoped advisory lock that
@@ -155,6 +161,23 @@ class PostgresUserStore:
                 cur.execute(_SELECT_BY_ID_SQL, (user_id,))
                 row = cur.fetchone()
         return _row_to_user(row) if row else None
+
+    def set_password(self, email: str, password_hash: str) -> UserRecord | None:
+        """Set a user's password hash by (case-insensitive) email.
+
+        Returns the updated record, or ``None`` when no account matches. Used by
+        the admin password-reset tool so an operator locked out of their account
+        can be recovered without a self-service email flow.
+        """
+        with self._connection_factory() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_UPDATE_PASSWORD_SQL, (password_hash, email))
+                row = cur.fetchone()
+        if row is None:
+            return None
+        record = _row_to_user(row)
+        logger.info("Reset user password", extra={"user_id": record.id})
+        return record
 
     def has_users(self) -> bool:
         """Return ``True`` when at least one account exists.

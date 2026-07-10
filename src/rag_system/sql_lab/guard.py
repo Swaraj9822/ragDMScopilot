@@ -27,7 +27,7 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.errors import SqlglotError
 
-from rag_system.copilot import _strip_sql_comments
+from rag_system.copilot import _strip_sql_comments, find_denied_function
 
 
 class SqlLabValidationError(ValueError):
@@ -189,6 +189,18 @@ class SqlLabGuard:
         if not self._allow_cte and next(statement.find_all(exp.With), None) is not None:
             raise SqlLabValidationError(
                 "WITH clause: common table expressions are not permitted in this version."
+            )
+
+        # 6b. Reject dangerous function calls (resource-exhaustion, filesystem,
+        # large-object, network, session-config) anywhere in the tree. The
+        # read-only role and statement timeout do not fully neutralise these
+        # (e.g. pg_sleep burns a connection regardless of grants), so the guard
+        # rejects them by name as defense-in-depth.
+        denied_function = find_denied_function(statement)
+        if denied_function is not None:
+            raise SqlLabValidationError(
+                f"Disallowed function: {denied_function}() is not permitted in a "
+                "read-only query."
             )
 
         # 7. Reject any reference to a denylisted sensitive table.

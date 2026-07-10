@@ -120,3 +120,26 @@ jobs:
           # marks the deployment red instead of being decorative.
           echo "Health check did not pass after 5 attempts."
           exit 1
+
+      - name: Verify SQL Lab viewer-role grants (drift check)
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_PORT: ${{ secrets.VM_SSH_PORT }}
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+        run: |
+          set -euo pipefail
+          # Runs the read-only-role grant drift check inside the api container
+          # (which holds the code, deps, and DB env). It self-skips when SQL Lab
+          # is not configured, so it is safe to run on every deploy; it fails
+          # (and marks the deploy red) only on real drift — a write grant, or any
+          # grant on a sensitive table. Re-run provisioning to remediate.
+          REMOTE_DIR="${DEPLOY_DIR:-/home/swara/rag-console}"
+          ssh -i ~/.ssh/id_deploy -p "${VM_PORT:-22}" \
+            "${VM_USER}@${VM_HOST}" \
+            "bash -s" <<EOF
+          set -euo pipefail
+          cd "${REMOTE_DIR}"
+          docker compose exec -T -w /app api \
+            python -m scripts.sql_lab.check_viewer_grants
+          EOF

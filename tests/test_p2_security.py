@@ -66,9 +66,26 @@ def test_malformed_inbound_trace_id_is_regenerated(bad: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_metrics_open_when_no_token_configured() -> None:
+def test_metrics_closed_by_default_when_auth_enabled_and_no_token(monkeypatch) -> None:
+    # No dedicated metrics token + auth enabled → closed by default: an
+    # anonymous scrape is refused rather than leaking metrics publicly.
+    monkeypatch.setattr(
+        api_module,
+        "get_settings",
+        lambda: SimpleNamespace(metrics_token=None, auth_enabled=True),
+    )
     client = TestClient(api_module.app)
-    # Default settings have metrics_token=None → endpoint stays open.
+    assert client.get("/metrics").status_code == 401
+
+
+def test_metrics_open_when_auth_disabled_and_no_token(monkeypatch) -> None:
+    # Trusted single-user/local deployment (auth disabled) keeps /metrics open.
+    monkeypatch.setattr(
+        api_module,
+        "get_settings",
+        lambda: SimpleNamespace(metrics_token=None, auth_enabled=False),
+    )
+    client = TestClient(api_module.app)
     assert client.get("/metrics").status_code == 200
 
 

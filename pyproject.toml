@@ -46,8 +46,10 @@ packages = ["src/rag_system"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-# Lint application code only; steering/tooling and generated dirs are excluded.
-extend-exclude = [".kiro", ".agents", "frontendkimchi"]
+# Lint application code only; steering/tooling, generated dirs, and ad-hoc
+# developer smoke scripts (src/_smoke_*.py — not part of the rag_system package)
+# are excluded.
+extend-exclude = [".kiro", ".agents", "frontendkimchi", "src/_smoke_*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -165,6 +165,63 @@ def load_schema_catalog(settings: Settings) -> CopilotSchemaCatalog:
     return CopilotSchemaCatalog.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
 
+# ---------------------------------------------------------------------------
+# Dangerous SQL function denylist (shared by both SQL guards)
+# ---------------------------------------------------------------------------
+
+#: Exact (lowercased) function names that must never appear in guard-approved
+#: SQL. These are resource-exhaustion, filesystem, large-object, network, and
+#: session-configuration functions that a read-only role or statement timeout
+#: does not fully neutralise (e.g. ``pg_sleep`` burns a connection for its whole
+#: argument regardless of grants). Blocking them at the guard keeps the guard a
+#: meaningful defense-in-depth layer rather than only a statement-shape check.
+_DENIED_SQL_FUNCTIONS: frozenset[str] = frozenset(
+    {
+        "pg_sleep",
+        "pg_sleep_for",
+        "pg_sleep_until",
+        "current_setting",
+        "set_config",
+        "pg_read_file",
+        "pg_read_binary_file",
+        "pg_ls_dir",
+        "pg_stat_file",
+        "query_to_xml",
+        "dblink",
+        "dblink_exec",
+    }
+)
+
+#: Denied function *families* matched by prefix: large-object access (``lo_*``),
+#: dblink network calls (``dblink*``), server-file reads (``pg_read*`` /
+#: ``pg_ls*``), and logical-replication controls (``pg_logical*``).
+_DENIED_SQL_FUNCTION_PREFIXES: tuple[str, ...] = (
+    "lo_",
+    "dblink",
+    "pg_read",
+    "pg_ls",
+    "pg_logical",
+)
+
+
+def find_denied_function(statement: exp.Expression) -> str | None:
+    """Return the name of the first denied function call in *statement*, or None.
+
+    Dangerous Postgres functions are not modelled by ``sqlglot`` and parse to
+    :class:`sqlglot.exp.Anonymous` nodes, so the whole tree is scanned for
+    anonymous calls whose (lowercased) name is on the denylist or matches a
+    denied prefix family. Ordinary modelled functions (``count``, ``sum``,
+    ``lower``, ``ilike`` …) are never ``Anonymous`` and so are unaffected.
+    """
+    for func in statement.find_all(exp.Anonymous):
+        name = (func.name or "").lower()
+        if not name:
+            continue
+        if name in _DENIED_SQL_FUNCTIONS or name.startswith(_DENIED_SQL_FUNCTION_PREFIXES):
+            return name
+    return None
+
+
 class CopilotSqlGuard:
     """AST-based allowlist for copilot-generated SQL.
 
@@ -239,6 +296,12 @@ class CopilotSqlGuard:
             raise SqlValidationError(
                 "Write, administrative, subquery, CTE, set-operation, and window "
                 "SQL is not allowed."
+            )
+
+        denied_function = find_denied_function(statement)
+        if denied_function is not None:
+            raise SqlValidationError(
+                f"Disallowed function: {denied_function}() is not permitted."
             )
 
         self._reject_star(statement)

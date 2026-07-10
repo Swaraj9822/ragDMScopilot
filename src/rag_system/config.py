@@ -163,6 +163,13 @@ class Settings(BaseSettings):
     sql_lab_deep_analysis_model_id: str = Field(
         default="gemini-3.1-pro", alias="SQL_LAB_DEEP_ANALYSIS_MODEL_ID"
     )
+    # Per-client rate limit for the operator-only SQL Lab endpoints (/sql/run,
+    # /sql/analyze). In-process/per-replica only (front with a shared limiter for
+    # multi-instance). Bounds how fast an operator can open fresh DB connections
+    # or trigger analysis calls. Set to 0 to disable.
+    sql_lab_rate_limit_per_minute: int = Field(
+        default=30, alias="SQL_LAB_RATE_LIMIT_PER_MINUTE"
+    )
 
     @field_validator("sql_lab_row_limit")
     @classmethod
@@ -564,12 +571,12 @@ class Settings(BaseSettings):
         default=10, alias="RAG_AUTH_RATE_LIMIT_PER_MINUTE"
     )
 
-    @field_validator("auth_rate_limit_per_minute")
+    @field_validator("auth_rate_limit_per_minute", "sql_lab_rate_limit_per_minute")
     @classmethod
     def _validate_auth_rate_limit(cls, value: int) -> int:
         if value < 0 or value > 10_000:
             raise ValueError(
-                f"invalid auth rate limit {value!r} per minute: must be within "
+                f"invalid rate limit {value!r} per minute: must be within "
                 "0 (disabled) and 10000 inclusive"
             )
         return value
@@ -629,15 +636,22 @@ class Settings(BaseSettings):
     # The refresh token is delivered to browsers as an httpOnly cookie (never in
     # the JSON body) so page JavaScript — and thus an XSS payload — cannot read
     # it. These knobs tune the cookie for the deployment's origin topology:
-    #   * Same-origin console + API: SameSite=Lax, Secure=True is ideal.
-    #   * Cross-origin console (different host/port, the dev default): the cookie
-    #     must be SameSite=None; Secure so the browser sends it on the
-    #     credentialed cross-site refresh call. Browsers treat localhost as a
-    #     secure context, so None+Secure also works over http://localhost in dev.
+    #   * Same-origin console + API (the production docker-compose topology, and
+    #     the secure default): SameSite=Lax, Secure=True. Lax stops the cookie
+    #     from riding along on cross-site POSTs, which — together with the Origin
+    #     check on /auth/refresh and /auth/logout — closes the CSRF vector.
+    #   * Cross-origin console (different host/port, e.g. the Vite dev server on
+    #     :3000 calling the API on :8000): the cookie must be SameSite=None;
+    #     Secure so the browser sends it on the credentialed cross-site refresh
+    #     call. Set RAG_AUTH_COOKIE_SAMESITE=none in that setup. Browsers treat
+    #     localhost as a secure context, so None+Secure also works over
+    #     http://localhost in dev.
     #   * Plain-http, non-localhost dev: set RAG_AUTH_COOKIE_SECURE=false (and
-    #     SameSite=Lax) so the browser will store the cookie.
+    #     keep SameSite=Lax) so the browser will store the cookie.
+    # The default is Lax (secure by default); cross-origin deployments opt into
+    # None explicitly rather than every deployment inheriting the weaker setting.
     auth_cookie_secure: bool = Field(default=True, alias="RAG_AUTH_COOKIE_SECURE")
-    auth_cookie_samesite: str = Field(default="none", alias="RAG_AUTH_COOKIE_SAMESITE")
+    auth_cookie_samesite: str = Field(default="lax", alias="RAG_AUTH_COOKIE_SAMESITE")
     auth_cookie_domain: str | None = Field(default=None, alias="RAG_AUTH_COOKIE_DOMAIN")
 
     @field_validator("auth_cookie_samesite")
