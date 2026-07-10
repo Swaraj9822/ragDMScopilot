@@ -21,7 +21,6 @@ RUN pip install -r requirements.txt \
 
 COPY src ./src
 COPY config ./config
-COPY scripts ./scripts
 COPY main.py ./
 
 # Run as an unprivileged user rather than root, so a compromise of the API or
