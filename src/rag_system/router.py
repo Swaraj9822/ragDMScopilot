@@ -165,6 +165,17 @@ class AgenticRouter:
             len(self._table_names),
         )
 
+    @property
+    def copilot_available(self) -> bool:
+        """Whether the database copilot was wired in at construction.
+
+        ``False`` means the router degrades to RAG-only. The application factory
+        uses this to decide whether to periodically rebuild the router in case a
+        previously-unavailable copilot dependency (schema catalog / DB config)
+        has since recovered.
+        """
+        return self._copilot_available
+
     # ------------------------------------------------------------------
     # Conversation preparation
     # ------------------------------------------------------------------

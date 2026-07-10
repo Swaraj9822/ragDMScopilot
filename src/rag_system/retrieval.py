@@ -162,7 +162,17 @@ class PineconeHybridIndex:
         document_ids: list[str] | None = None,
         sparse_vector: dict[str, Any] | None = None,
     ) -> list[RetrievalHit]:
-        filters = {"document_id": {"$in": document_ids}} if document_ids else None
+        if document_ids is None:
+            # No scope requested → search the whole index.
+            filters = None
+        elif len(document_ids) == 0:
+            # An explicitly empty scope means "restricted to zero documents"
+            # (e.g. a non-operator with no accessible documents). Return no hits
+            # rather than falling through to an unscoped whole-index search —
+            # that fall-through would leak documents the caller may not read.
+            return []
+        else:
+            filters = {"document_id": {"$in": document_ids}}
 
         query_kwargs: dict[str, Any] = {
             "vector": query_vector,

@@ -13,9 +13,20 @@ assert that only the bounded, templated label appears — never the per-id paths
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from rag_system import api as api_module
+from rag_system.api import verify_metrics_access
+
+
+@pytest.fixture(autouse=True)
+def _open_metrics_endpoint():
+    """These tests exercise /metrics *content*, not its access control, so the
+    gate is bypassed here (it is covered directly in test_metrics_access.py)."""
+    api_module.app.dependency_overrides[verify_metrics_access] = lambda: None
+    yield
+    api_module.app.dependency_overrides.pop(verify_metrics_access, None)
 
 
 class _MissingDocService:

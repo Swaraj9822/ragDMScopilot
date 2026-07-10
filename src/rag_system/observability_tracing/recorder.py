@@ -213,7 +213,12 @@ class SpanRecorder:
         t0 = perf_counter()
         try:
             yield root_span
-        except Exception as exc:
+        except BaseException as exc:  # noqa: BLE001 - close+re-raise, incl. CancelledError
+            # Catch BaseException (not just Exception) so a cancelled request
+            # (asyncio.CancelledError on client disconnect) still closes the
+            # Root_Span and releases its trace_id from the active set — otherwise
+            # the id leaks and the span is never enqueued. The exception is
+            # re-raised after cleanup.
             self._close_span(
                 root_span,
                 t0,
@@ -294,7 +299,9 @@ class SpanRecorder:
         t0 = perf_counter()
         try:
             yield span
-        except Exception as exc:
+        except BaseException as exc:  # noqa: BLE001 - close+re-raise, incl. CancelledError
+            # As in start_trace: catch BaseException so a cancelled request still
+            # closes and enqueues the span rather than leaking it.
             self._close_span(
                 span,
                 t0,

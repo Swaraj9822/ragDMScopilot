@@ -482,11 +482,11 @@ def test_get_router_falls_back_to_rag_only_when_copilot_unready(monkeypatch) -> 
     monkeypatch.setattr(api_module, "get_copilot_service", lambda: _UnreadyCopilot())
     monkeypatch.setattr(api_module, "AgenticRouter", fake_router)
 
-    api_module.get_router.cache_clear()
+    api_module._router_state.update({"router": None, "checked_at": 0.0})
     try:
         api_module.get_router()
     finally:
-        api_module.get_router.cache_clear()
+        api_module._router_state.update({"router": None, "checked_at": 0.0})
 
     assert captured["copilot"] is None
 
@@ -505,10 +505,10 @@ def test_get_router_keeps_copilot_when_ready(monkeypatch) -> None:
     monkeypatch.setattr(api_module, "get_copilot_service", lambda: ready)
     monkeypatch.setattr(api_module, "AgenticRouter", fake_router)
 
-    api_module.get_router.cache_clear()
+    api_module._router_state.update({"router": None, "checked_at": 0.0})
     try:
         api_module.get_router()
     finally:
-        api_module.get_router.cache_clear()
+        api_module._router_state.update({"router": None, "checked_at": 0.0})
 
     assert captured["copilot"] is ready

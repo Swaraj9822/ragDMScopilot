@@ -7,6 +7,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any, Iterator
 
 from rag_system.chunking import DocumentChunker
@@ -139,10 +140,40 @@ class StaleIngestionError(RuntimeError):
 # fixed worker count caps concurrent background writes instead of spawning one
 # unbounded thread per query under load; trace writes are short GCS puts, so a
 # small pool drains them quickly. Threads are daemon so they never hold up
-# process exit beyond a brief drain.
-_TRACE_PERSIST_EXECUTOR = ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="trace-writer"
-)
+# process exit beyond a brief drain. The pool is recreated on demand after a
+# graceful shutdown drains it, so a lifespan shutdown never permanently wedges
+# trace persistence for a still-running process (e.g. across tests).
+_trace_persist_executor: ThreadPoolExecutor | None = None
+_trace_persist_lock = Lock()
+
+
+def _get_trace_persist_executor() -> ThreadPoolExecutor:
+    global _trace_persist_executor  # noqa: PLW0603
+    with _trace_persist_lock:
+        if _trace_persist_executor is None:
+            _trace_persist_executor = ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="trace-writer"
+            )
+        return _trace_persist_executor
+
+
+def shutdown_trace_persist_executor(wait: bool = True) -> None:
+    """Drain the off-path query-trace persistence pool on graceful shutdown.
+
+    Waits for in-flight trace writes to complete so they are not lost when the
+    process stops cleanly (the threads are daemon, so an ungraceful kill still
+    never hangs). The pool is cleared so a subsequent submit lazily recreates it
+    rather than failing — keeping this safe to call mid-lifetime. Best-effort.
+    """
+    global _trace_persist_executor  # noqa: PLW0603
+    with _trace_persist_lock:
+        executor = _trace_persist_executor
+        _trace_persist_executor = None
+    if executor is not None:
+        try:
+            executor.shutdown(wait=wait)
+        except Exception:  # noqa: BLE001 - shutdown must not raise
+            logger.warning("Failed to shut down trace-persist executor", exc_info=True)
 
 
 class RagService:
@@ -216,14 +247,24 @@ class RagService:
             self._generator = GroundedAnswerGenerator(self._settings)
         return self._generator
 
-    async def queue_document(self, filename: str, content: bytes) -> DocumentRecord:
-        return await self._queue_document(str(uuid.uuid4()), filename, content)
+    async def queue_document(
+        self, filename: str, content: bytes, owner: str | None = None
+    ) -> DocumentRecord:
+        return await self._queue_document(str(uuid.uuid4()), filename, content, owner=owner)
 
     # Backward-compatible alias
-    async def queue_pdf(self, filename: str, content: bytes) -> DocumentRecord:
-        return await self.queue_document(filename, content)
+    async def queue_pdf(
+        self, filename: str, content: bytes, owner: str | None = None
+    ) -> DocumentRecord:
+        return await self.queue_document(filename, content, owner=owner)
 
-    async def update_document(self, document_id: str, filename: str, content: bytes) -> DocumentRecord | None:
+    async def update_document(
+        self,
+        document_id: str,
+        filename: str,
+        content: bytes,
+        owner: str | None = None,
+    ) -> DocumentRecord | None:
         current = await asyncio.to_thread(self.get_document, document_id)
         if current is None or current.status == DocumentStatus.deleted:
             return None
@@ -233,7 +274,7 @@ class RagService:
         # and atomically published; the new ingestion cleans up superseded
         # vectors only after it switches the active version. Pre-deleting left a
         # gap where a failed replacement destroyed the last good version.
-        return await self._queue_document(document_id, filename, content)
+        return await self._queue_document(document_id, filename, content, owner=owner)
 
     def delete_document(self, document_id: str) -> DocumentRecord | None:
         record = self.get_document(document_id)
@@ -250,7 +291,9 @@ class RagService:
         logger.info("Document deleted", extra={"document_id": document_id, "version": record.version})
         return deleted
 
-    async def _queue_document(self, document_id: str, filename: str, content: bytes) -> DocumentRecord:
+    async def _queue_document(
+        self, document_id: str, filename: str, content: bytes, owner: str | None = None
+    ) -> DocumentRecord:
         version = content_hash(content)
         log_extra: dict[str, Any] = {
             "document_id": document_id,
@@ -275,6 +318,14 @@ class RagService:
         if hasattr(self._store, "get_json"):
             existing = await asyncio.to_thread(self.get_document, document_id)
         active_version = self._published_version_of(existing)
+        # Owner assignment for role-based corpus scoping (R4.11): a brand-new
+        # document is owned by its uploader; a replacement preserves the original
+        # owner so re-ingesting someone's document never silently reassigns it.
+        # A legacy record with no owner is backfilled the next time its owner
+        # replaces it.
+        resolved_owner = (
+            existing.owner if (existing is not None and existing.owner is not None) else owner
+        )
         record = DocumentRecord(
             id=document_id,
             title=filename,
@@ -282,6 +333,7 @@ class RagService:
             s3_uri=s3_uri,
             status=DocumentStatus.queued,
             active_version=active_version,
+            owner=resolved_owner,
         )
         await asyncio.to_thread(self._save_document_record, record)
 
@@ -1026,11 +1078,11 @@ class RagService:
             1, getattr(self._settings, "document_list_max_workers", 16)
         )
         if max_workers <= 1 or len(document_ids) == 1:
-            fetched = [self.get_document(document_id) for document_id in document_ids]
+            fetched = [self._safe_get_document(document_id) for document_id in document_ids]
         else:
             fetched = list(
                 self._get_document_list_executor(max_workers).map(
-                    self.get_document, document_ids
+                    self._safe_get_document, document_ids
                 )
             )
 
@@ -1038,6 +1090,25 @@ class RagService:
         records.sort(key=lambda r: r.title.lower())
         logger.info("Listed %d documents", len(records))
         return records
+
+    def _safe_get_document(self, document_id: str) -> DocumentRecord | None:
+        """``get_document`` that isolates per-record failures during listing.
+
+        A single corrupt/unreadable record (bad JSON, a transient read error)
+        must not abort the whole listing — otherwise one bad document takes the
+        entire Documents tab down. Failures are logged and skipped (returned as
+        ``None``), mirroring the per-item isolation used by
+        ``list_feedback_reviews``.
+        """
+        try:
+            return self.get_document(document_id)
+        except Exception:  # noqa: BLE001 - isolate one record; keep listing the rest
+            logger.warning(
+                "Skipping document that could not be read during listing",
+                extra={"document_id": document_id},
+                exc_info=True,
+            )
+            return None
 
     def _get_document_list_executor(self, max_workers: int) -> ThreadPoolExecutor:
         """Return the shared Documents-listing pool, created once on first use.
@@ -1765,7 +1836,7 @@ class RagService:
                 )
 
         try:
-            _TRACE_PERSIST_EXECUTOR.submit(_run_logged)
+            _get_trace_persist_executor().submit(_run_logged)
         except RuntimeError:
             # Executor already shut down (e.g. during interpreter teardown) —
             # fall back to an inline best-effort write so the trace is not lost.

@@ -21,7 +21,17 @@ RUN pip install -r requirements.txt \
 
 COPY src ./src
 COPY config ./config
+COPY scripts ./scripts
 COPY main.py ./
+
+# Run as an unprivileged user rather than root, so a compromise of the API or
+# document parser cannot trivially write outside the app or escalate. The app
+# needs no write access to the image (artifacts live in GCS), so read-only
+# ownership of /app is sufficient. uvicorn binds :8000 (>1024), which a non-root
+# user may open.
+RUN useradd --create-home --uid 10001 appuser \
+    && chown -R appuser:appuser /app
+USER appuser
 
 EXPOSE 8000
 

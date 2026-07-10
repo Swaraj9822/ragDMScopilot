@@ -24,10 +24,21 @@ from __future__ import annotations
 
 import re
 
+import pytest
 from fastapi.testclient import TestClient
 
 from rag_system import api as api_module
+from rag_system.api import verify_metrics_access
 from rag_system.observability import metrics
+
+
+@pytest.fixture(autouse=True)
+def _open_metrics_endpoint():
+    """Bypass the /metrics access gate — these tests assert output content, not
+    access control (which is covered in test_metrics_access.py)."""
+    api_module.app.dependency_overrides[verify_metrics_access] = lambda: None
+    yield
+    api_module.app.dependency_overrides.pop(verify_metrics_access, None)
 
 
 # ---------------------------------------------------------------------------

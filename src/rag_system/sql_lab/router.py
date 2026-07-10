@@ -40,12 +40,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag_system.auth import UserPublic, require_operator
 from rag_system.config import Settings, get_settings
 from rag_system.observability import get_logger
+from rag_system.rate_limit import SlidingWindowRateLimiter, rate_limit
 from rag_system.sql_lab.analyzer import ChartSpecAnalyzer
 from rag_system.sql_lab.chart_spec import ChartSpec, ChartSpecValidationError
 from rag_system.sql_lab.errors import (
@@ -63,6 +64,36 @@ from rag_system.sql_lab.service import SqlLabService, SqlRunResult
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/sql", tags=["sql-lab"])
+
+# Per-process rate limiters for the SQL Lab endpoints, keyed by the configured
+# per-minute allowance so a settings reload rebuilds them (mirrors the auth
+# limiter). ``None`` when throttling is disabled (allowance 0).
+_sql_lab_limiters: dict[int, SlidingWindowRateLimiter | None] = {}
+
+
+def _get_sql_lab_limiter(settings: Settings) -> SlidingWindowRateLimiter | None:
+    rpm = settings.sql_lab_rate_limit_per_minute
+    if rpm not in _sql_lab_limiters:
+        _sql_lab_limiters[rpm] = (
+            SlidingWindowRateLimiter(limit=rpm, window_seconds=60.0) if rpm > 0 else None
+        )
+    return _sql_lab_limiters[rpm]
+
+
+def _sql_lab_rate_limit(scope: str):
+    """FastAPI dependency list throttling *scope* for a SQL Lab endpoint.
+
+    Resolves the shared limiter lazily on first request; a no-op when the
+    per-minute allowance is 0. Keyed by client identifier per :func:`rate_limit`.
+    """
+
+    def dependency(request: Request, settings: Settings = Depends(get_settings)) -> None:
+        limiter = _get_sql_lab_limiter(settings)
+        if limiter is None:
+            return
+        rate_limit(limiter, scope=scope)(request)
+
+    return [Depends(dependency)]
 
 #: Maximum accepted length of a submitted SQL string (R4.1). Enforced in the
 #: handler (rather than as a pydantic field constraint) so an over-length body
@@ -149,6 +180,7 @@ def _operator_identity(operator: UserPublic) -> str:
 @router.post(
     "/run",
     response_model=SqlRunResponse,
+    dependencies=_sql_lab_rate_limit("sql_run"),
 )
 def run_sql(
     request: SqlRunRequest,
@@ -337,6 +369,7 @@ def get_chart_spec_analyzer(
 @router.post(
     "/analyze",
     response_model=ChartSpec,
+    dependencies=_sql_lab_rate_limit("sql_analyze"),
 )
 def analyze_result_set(
     request: SqlAnalyzeRequest,

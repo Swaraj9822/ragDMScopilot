@@ -1,7 +1,8 @@
 from enum import StrEnum
+from math import isfinite
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -194,10 +195,33 @@ class RetrievalHit(BaseModel):
     score: float
     source: str
 
+    @field_validator("score")
+    @classmethod
+    def _score_must_be_finite(cls, value: float) -> float:
+        """Reject NaN/±inf scores.
+
+        Similarity scores are metric-dependent and legitimately unbounded (a
+        ``dotproduct`` index can return negatives or values above 1), so no
+        ``[0, 1]`` range is imposed. But a non-finite score would silently
+        corrupt downstream confidence math and ordering, so it is rejected here.
+        """
+        if not isfinite(value):
+            raise ValueError(f"retrieval score must be a finite number, got {value!r}")
+        return value
+
+
+#: Upper bounds on user-supplied query inputs. A question has no legitimate need
+#: to exceed a few thousand characters, and an unbounded value would flow
+#: straight into (paid, latency-bound) LLM prompts; the document-scope list is
+#: likewise capped so a request body cannot grow without limit. Both guard the
+#: answer path against accidental or abusive oversized payloads.
+MAX_QUESTION_CHARS = 16_000
+MAX_DOCUMENT_IDS = 1_000
+
 
 class QueryRequest(BaseModel):
-    question: str = Field(min_length=1)
-    document_ids: list[str] | None = None
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
+    document_ids: list[str] | None = Field(default=None, max_length=MAX_DOCUMENT_IDS)
 
 
 class QueryResponse(BaseModel):
@@ -218,7 +242,7 @@ class QueryResponse(BaseModel):
 
 
 class CopilotQueryRequest(BaseModel):
-    question: str = Field(min_length=1)
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
     include_sql: bool = False
 
 
@@ -240,8 +264,8 @@ class CopilotQueryResponse(BaseModel):
 
 
 class UnifiedQueryRequest(BaseModel):
-    question: str = Field(min_length=1)
-    document_ids: list[str] | None = None
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
+    document_ids: list[str] | None = Field(default=None, max_length=MAX_DOCUMENT_IDS)
     include_sql: bool = False
     #: Server-side conversation this turn belongs to. ``None`` starts a new
     #: conversation; the id to continue is returned on the response.
@@ -578,7 +602,7 @@ class ReplayRetrievalParams(BaseModel):
 
 
 class ReplayRunRequest(BaseModel):
-    question: str = Field(min_length=1)
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
     ai_configuration_version_id: str
     retrieval_params: ReplayRetrievalParams
     corpus_snapshot_id: str

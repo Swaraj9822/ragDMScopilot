@@ -19,8 +19,9 @@ auth_router_mod = importlib.import_module("rag_system.auth.router")
 
 
 def _reset_limiter(monkeypatch, rpm: int) -> None:
-    monkeypatch.setattr(auth_router_mod, "_auth_limiter", None, raising=False)
-    monkeypatch.setattr(auth_router_mod, "_auth_limiter_ready", False, raising=False)
+    # Clear the per-rate limiter cache so each test builds fresh, and point the
+    # accessor at a Settings stub carrying the desired allowance.
+    monkeypatch.setattr(auth_router_mod, "_auth_limiters", {}, raising=False)
     monkeypatch.setattr(
         auth_router_mod,
         "get_settings",
