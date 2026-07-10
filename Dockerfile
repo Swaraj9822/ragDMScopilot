@@ -21,6 +21,10 @@ RUN pip install -r requirements.txt \
 
 COPY src ./src
 COPY config ./config
+# scripts holds ops/one-off tooling run via `docker compose exec` (e.g. the SQL
+# Lab viewer-grant drift check invoked by the deploy workflow), so it must be in
+# the image. Kept out of .dockerignore for the same reason.
+COPY scripts ./scripts
 COPY main.py ./
 
 # Run as an unprivileged user rather than root, so a compromise of the API or
